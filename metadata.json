@@ -1,0 +1,8 @@
+{
+  "name": "Remix VN Creator AI av 20261017",
+  "description": "Fork für neues Dungeon Battle System",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
