@@ -4,16 +4,11 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { 
   ArrowLeft, RotateCcw, Upload, Compass, Shield, User, 
   ChevronDown, ChevronUp, Footprints, Sparkles, Check, 
-  Trash2, Sliders, Film, HelpCircle, Layers 
+  Trash2, Sliders, Film, HelpCircle, Layers, Box, Grid, Square, DoorClosed, Layers as LayersIcon
 } from 'lucide-react';
 import { Character } from '../types';
 import { getItem, setItem } from '../utils/db';
 import { loadImage } from '../utils/imageStorage';
-import { 
-  createAnimeDungeonFloorTextures, 
-  createAnimeDungeonWallTextures, 
-  createAnimeDungeonDoorTextures 
-} from './dungeonTextures';
 
 interface DungeonTestViewProps {
   onExit: () => void;
@@ -27,29 +22,52 @@ interface TileCoord {
 
 type Direction = 'NORTH' | 'EAST' | 'SOUTH' | 'WEST';
 
-const TILE_SIZE = 2.4; // World units per tile
+const TILE_SIZE = 2.4; // Default procedural world units per tile (total 7.2m)
+const BLENDER_CHUNK_SIZE = 8.0; // Blender Floor Chunk is 8m x 8m
+const BLENDER_TILE_SIZE = 8.0 / 3; // ~2.6667m per tile for 3x3 grid
 const PLATFORM_HALF = (3 * TILE_SIZE) / 2; // 3.6 units from center to edge
 const WALL_HEIGHT = 3.8;
 const WALL_THICKNESS = 0.55;
 
-const STORAGE_KEY_GLB = 'dungeon_custom_glb_config';
+const STORAGE_KEY_CHAR_GLB = 'dungeon_custom_glb_config';
+const STORAGE_KEY_FLOOR_GLB = 'dungeon_custom_floor_glb';
+const STORAGE_KEY_WALL_GLB = 'dungeon_custom_wall_glb';
+const STORAGE_KEY_DOOR_GLB = 'dungeon_custom_door_glb';
 
 interface StoredGLBConfig {
   fileName: string;
   fileSize: number;
   dataBase64: string;
   scale?: number;
+  useRawScale?: boolean;
   offsetY?: number;
   rotationY?: number;
   idleClipName?: string;
   runClipName?: string;
 }
 
-// Convert tile coordinate to world coordinates
-function tileToWorld(col: number, row: number): THREE.Vector3 {
-  const x = (col - 1) * TILE_SIZE;
-  const z = (row - 1) * TILE_SIZE;
-  return new THREE.Vector3(x, 0.05, z);
+interface StoredEnvironmentGLBConfig {
+  fileName: string;
+  fileSize: number;
+  dataBase64: string;
+  scale?: number;
+  offsetX?: number;
+  offsetY?: number;
+  offsetZ?: number;
+  rotationY?: number;
+  showLeftWall?: boolean;
+  showUpperWall?: boolean;
+  showSecondWall?: boolean;
+  showLeftDoor?: boolean;
+  showUpperDoor?: boolean;
+  wallLayout?: 'diorama' | 'single' | 'three' | 'four';
+}
+
+// Convert tile coordinate to world coordinates with dynamic tile size & surface height
+function tileToWorld(col: number, row: number, tileSize: number = TILE_SIZE, surfaceY: number = 0.05): THREE.Vector3 {
+  const x = (col - 1) * tileSize;
+  const z = (row - 1) * tileSize;
+  return new THREE.Vector3(x, surfaceY, z);
 }
 
 // Helper: Convert ArrayBuffer to Base64 Data URL
@@ -75,16 +93,376 @@ function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-// Procedural anime dungeon textures are generated via ./dungeonTextures
+// =========================================================================
+// TEXTURE GENERATORS (Matching the Stylized Anime Character from image.png)
+// =========================================================================
 
-// Wall textures now loaded from ./dungeonTextures
+function createStylizedFloorCanvas(): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 1024;
+  const ctx = canvas.getContext('2d')!;
 
-// Door textures now loaded from ./dungeonTextures
+  const bgGrad = ctx.createRadialGradient(512, 512, 100, 512, 512, 700);
+  bgGrad.addColorStop(0, '#989793');
+  bgGrad.addColorStop(0.6, '#86847f');
+  bgGrad.addColorStop(1, '#6c6a66');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, 1024, 1024);
 
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+  for (let i = 0; i < 600; i++) {
+    const rx = Math.random() * 1024;
+    const ry = Math.random() * 1024;
+    ctx.beginPath();
+    ctx.arc(rx, ry, 12 + Math.random() * 24, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const borderWidth = 64;
+  const innerSize = 1024 - borderWidth * 2;
+  const tileSize = innerSize / 3;
+
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const tx = borderWidth + c * tileSize;
+      const ty = borderWidth + r * tileSize;
+
+      const subPaver = tileSize / 2;
+      for (let sr = 0; sr < 2; sr++) {
+        for (let sc = 0; sc < 2; sc++) {
+          const px = tx + sc * subPaver;
+          const py = ty + sr * subPaver;
+
+          const tint = ((c * 7 + r * 13 + sc * 3 + sr * 5) % 9) - 4;
+          const pGrad = ctx.createLinearGradient(px, py, px + subPaver, py + subPaver);
+          pGrad.addColorStop(0, `rgb(${145 + tint * 2}, ${143 + tint * 2}, ${138 + tint})`);
+          pGrad.addColorStop(1, `rgb(${125 + tint * 2}, ${123 + tint * 2}, ${118 + tint})`);
+
+          const pad = 4;
+          const radius = 8;
+          ctx.fillStyle = pGrad;
+          ctx.beginPath();
+          ctx.roundRect(px + pad, py + pad, subPaver - pad * 2, subPaver - pad * 2, radius);
+          ctx.fill();
+
+          ctx.strokeStyle = 'rgba(240, 238, 230, 0.45)';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.moveTo(px + pad + radius, py + pad);
+          ctx.lineTo(px + subPaver - pad - radius, py + pad);
+          ctx.moveTo(px + pad, py + pad + radius);
+          ctx.lineTo(px + pad, py + subPaver - pad - radius);
+          ctx.stroke();
+
+          ctx.strokeStyle = 'rgba(40, 38, 35, 0.45)';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.moveTo(px + subPaver - pad, py + pad + radius);
+          ctx.lineTo(px + subPaver - pad, py + subPaver - pad - radius);
+          ctx.moveTo(px + pad + radius, py + subPaver - pad);
+          ctx.lineTo(px + subPaver - pad - radius, py + subPaver - pad);
+          ctx.stroke();
+        }
+      }
+
+      ctx.strokeStyle = 'rgba(45, 42, 38, 0.65)';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(tx + 2, ty + 2, tileSize - 4, tileSize - 4);
+
+      ctx.strokeStyle = 'rgba(190, 165, 120, 0.35)';
+      ctx.lineWidth = 2;
+      const cornerL = 20;
+      ctx.beginPath();
+      ctx.moveTo(tx + 12, ty + 12 + cornerL);
+      ctx.lineTo(tx + 12, ty + 12);
+      ctx.lineTo(tx + 12 + cornerL, ty + 12);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(tx + tileSize - 12 - cornerL, ty + 12);
+      ctx.lineTo(tx + tileSize - 12, ty + 12);
+      ctx.lineTo(tx + tileSize - 12, ty + 12 + cornerL);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(tx + tileSize - 12, ty + tileSize - 12 - cornerL);
+      ctx.lineTo(tx + tileSize - 12, ty + tileSize - 12);
+      ctx.lineTo(tx + tileSize - 12 - cornerL, ty + tileSize - 12);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(tx + 12 + cornerL, ty + tileSize - 12);
+      ctx.lineTo(tx + 12, ty + tileSize - 12);
+      ctx.lineTo(tx + 12, ty + tileSize - 12 - cornerL);
+      ctx.stroke();
+    }
+  }
+
+  const cx = 512;
+  const cy = 512;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(195, 175, 130, 0.4)';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 70, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(195, 175, 130, 0.25)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 84, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(195, 175, 130, 0.45)';
+  [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2].forEach(angle => {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0, -96);
+    ctx.lineTo(8, -80);
+    ctx.lineTo(0, -72);
+    ctx.lineTo(-8, -80);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  });
+  ctx.restore();
+
+  ctx.fillStyle = '#6e6b66';
+  ctx.fillRect(0, 0, 1024, borderWidth);
+  ctx.fillRect(0, 1024 - borderWidth, 1024, borderWidth);
+  ctx.fillRect(0, 0, borderWidth, 1024);
+  ctx.fillRect(1024 - borderWidth, 0, borderWidth, 1024);
+
+  ctx.strokeStyle = 'rgba(40, 38, 35, 0.6)';
+  ctx.lineWidth = 3;
+  for (let i = 0; i <= 3; i++) {
+    const pos = borderWidth + i * tileSize;
+    ctx.beginPath();
+    ctx.moveTo(pos, 0);
+    ctx.lineTo(pos, borderWidth);
+    ctx.moveTo(pos, 1024 - borderWidth);
+    ctx.lineTo(pos, 1024);
+    ctx.moveTo(0, pos);
+    ctx.lineTo(borderWidth, pos);
+    ctx.moveTo(1024 - borderWidth, pos);
+    ctx.lineTo(1024, pos);
+    ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(borderWidth, borderWidth);
+  ctx.moveTo(1024, 0);
+  ctx.lineTo(1024 - borderWidth, borderWidth);
+  ctx.moveTo(1024, 1024);
+  ctx.lineTo(1024 - borderWidth, 1024 - borderWidth);
+  ctx.moveTo(0, 1024);
+  ctx.lineTo(borderWidth, 1024 - borderWidth);
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(230, 225, 215, 0.4)';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(3, 3, 1018, 1018);
+
+  return canvas;
+}
+
+function createStylizedWallCanvas(): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 1024;
+  const ctx = canvas.getContext('2d')!;
+
+  const grad = ctx.createLinearGradient(0, 0, 0, 1024);
+  grad.addColorStop(0, '#555452');
+  grad.addColorStop(0.3, '#6f6c68');
+  grad.addColorStop(0.8, '#62605b');
+  grad.addColorStop(1, '#4d4b47');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 1024, 1024);
+
+  const numRows = 7;
+  const rowHeight = 1024 / numRows;
+
+  for (let r = 0; r < numRows; r++) {
+    const y = r * rowHeight;
+    const numCols = 4;
+    const colWidth = 1024 / numCols;
+    const offset = r % 2 === 0 ? 0 : colWidth / 2;
+
+    for (let c = -1; c <= numCols; c++) {
+      const x = c * colWidth + offset;
+      const toneOffset = ((r * 11 + c * 17) % 7) - 3;
+
+      const pad = 5;
+      const bGrad = ctx.createLinearGradient(x, y, x, y + rowHeight);
+      bGrad.addColorStop(0, `rgb(${118 + toneOffset * 2}, ${115 + toneOffset * 2}, ${110 + toneOffset})`);
+      bGrad.addColorStop(1, `rgb(${98 + toneOffset * 2}, ${95 + toneOffset * 2}, ${90 + toneOffset})`);
+
+      ctx.fillStyle = bGrad;
+      ctx.beginPath();
+      ctx.roundRect(x + pad, y + pad, colWidth - pad * 2, rowHeight - pad * 2, 6);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(235, 230, 220, 0.28)';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(x + pad + 6, y + pad);
+      ctx.lineTo(x + colWidth - pad - 6, y + pad);
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(30, 28, 25, 0.4)';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(x + pad + 6, y + rowHeight - pad);
+      ctx.lineTo(x + colWidth - pad - 6, y + rowHeight - pad);
+      ctx.stroke();
+    }
+  }
+
+  ctx.strokeStyle = 'rgba(35, 33, 30, 0.6)';
+  ctx.lineWidth = 4;
+  for (let r = 1; r < numRows; r++) {
+    const y = r * rowHeight;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(1024, y);
+    ctx.stroke();
+  }
+
+  return canvas;
+}
+
+function createStylizedDoorCanvas(): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 768;
+  const ctx = canvas.getContext('2d')!;
+
+  const woodGrad = ctx.createLinearGradient(0, 0, 512, 0);
+  woodGrad.addColorStop(0, '#3f2518');
+  woodGrad.addColorStop(0.5, '#4e2f1f');
+  woodGrad.addColorStop(1, '#3a2114');
+  ctx.fillStyle = woodGrad;
+  ctx.fillRect(0, 0, 512, 768);
+
+  const numPlanks = 4;
+  const plankW = 512 / numPlanks;
+  for (let i = 0; i < numPlanks; i++) {
+    const px = i * plankW;
+    const tone = 75 + (i % 2) * 8;
+
+    const pGrad = ctx.createLinearGradient(px, 0, px + plankW, 0);
+    pGrad.addColorStop(0, `rgb(${tone + 8}, ${Math.floor(tone * 0.65)}, ${Math.floor(tone * 0.45)})`);
+    pGrad.addColorStop(0.5, `rgb(${tone + 20}, ${Math.floor(tone * 0.75)}, ${Math.floor(tone * 0.5)})`);
+    pGrad.addColorStop(1, `rgb(${tone}, ${Math.floor(tone * 0.6)}, ${Math.floor(tone * 0.4)})`);
+
+    ctx.fillStyle = pGrad;
+    ctx.beginPath();
+    ctx.roundRect(px + 3, 4, plankW - 6, 760, 4);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(25, 12, 6, 0.25)';
+    ctx.lineWidth = 1.5;
+    for (let k = 0; k < 4; k++) {
+      const gx = px + 12 + k * 18;
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.bezierCurveTo(gx - 6, 250, gx + 6, 500, gx, 768);
+      ctx.stroke();
+    }
+  }
+
+  ctx.strokeStyle = 'rgba(20, 10, 5, 0.7)';
+  ctx.lineWidth = 4;
+  for (let i = 1; i < numPlanks; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * plankW, 0);
+    ctx.lineTo(i * plankW, 768);
+    ctx.stroke();
+  }
+
+  const drawOrnateStrap = (yPos: number) => {
+    const strapGrad = ctx.createLinearGradient(0, yPos, 0, yPos + 36);
+    strapGrad.addColorStop(0, '#e2e8f0');
+    strapGrad.addColorStop(0.5, '#cbd5e1');
+    strapGrad.addColorStop(1, '#94a3b8');
+    ctx.fillStyle = strapGrad;
+    ctx.beginPath();
+    ctx.roundRect(24, yPos, 464, 36, 8);
+    ctx.fill();
+
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(80, yPos + 18, 10, 0, Math.PI * 2);
+    ctx.moveTo(80, yPos + 18);
+    ctx.bezierCurveTo(120, yPos + 6, 160, yPos + 30, 200, yPos + 18);
+    ctx.arc(256, yPos + 18, 10, 0, Math.PI * 2);
+    ctx.moveTo(256, yPos + 18);
+    ctx.bezierCurveTo(296, yPos + 6, 336, yPos + 30, 376, yPos + 18);
+    ctx.arc(432, yPos + 18, 10, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#fbbf24';
+    [40, 140, 256, 370, 472].forEach(rx => {
+      ctx.beginPath();
+      ctx.arc(rx, yPos + 18, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#92400e';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+  };
+
+  drawOrnateStrap(120);
+  drawOrnateStrap(600);
+
+  const kx = 180;
+  const ky = 380;
+  ctx.fillStyle = '#cbd5e1';
+  ctx.beginPath();
+  ctx.arc(kx, ky, 28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#475569';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.strokeStyle = '#3b82f6';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(kx, ky, 18, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.strokeStyle = '#64748b';
+  ctx.lineWidth = 10;
+  ctx.beginPath();
+  ctx.arc(kx, ky + 42, 34, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(kx - 3, ky + 39, 32, -Math.PI / 2, Math.PI / 4);
+  ctx.stroke();
+
+  return canvas;
+}
 
 export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, characters = [] }) => {
   const mountRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const charFileInputRef = useRef<HTMLInputElement>(null);
+  const floorFileInputRef = useRef<HTMLInputElement>(null);
+  const wallFileInputRef = useRef<HTMLInputElement>(null);
+  const doorFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Active Asset Tab in Dock
+  const [activeTab, setActiveTab] = useState<'character' | 'floor' | 'wall' | 'door'>('character');
 
   // Gameplay state
   const [characterCoord, setCharacterCoord] = useState<TileCoord>({ col: 1, row: 1 });
@@ -104,12 +482,59 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   const [customModelName, setCustomModelName] = useState<string>('');
   const [customModelSize, setCustomModelSize] = useState<number>(0);
   const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
+  const [dragHoverTarget, setDragHoverTarget] = useState<'character' | 'floor' | 'wall' | 'door' | null>(null);
   const [isLoadingModel, setIsLoadingModel] = useState<boolean>(false);
+  const [loadingMessage, setLoadingMessage] = useState<string>('3D-Modell wird geladen...');
 
-  // Model Fine-Tuning state
+  // Character Fine-Tuning state
+  const [useRawCharacterScale, setUseRawCharacterScale] = useState<boolean>(true); // 1:1 Blender scale
   const [modelScale, setModelScale] = useState<number>(1.0);
   const [modelOffsetY, setModelOffsetY] = useState<number>(0.0);
   const [modelRotationY, setModelRotationY] = useState<number>(0); // in degrees: 0, 90, 180, 270
+
+  // Floor Chunk GLB state (8m x 8m in Blender, center pivot)
+  const [customFloorLoaded, setCustomFloorLoaded] = useState<boolean>(false);
+  const [customFloorName, setCustomFloorName] = useState<string>('');
+  const [customFloorSize, setCustomFloorSize] = useState<number>(0);
+  const [floorScale, setFloorScale] = useState<number>(1.0);
+  const [floorOffsetX, setFloorOffsetX] = useState<number>(0.0);
+  const [floorOffsetY, setFloorOffsetY] = useState<number>(0.0);
+  const [floorOffsetZ, setFloorOffsetZ] = useState<number>(0.0);
+  const [floorRotationY, setFloorRotationY] = useState<number>(0);
+
+  // Wall GLB state (8m x 0.5m x 4m in Blender, center-floor pivot)
+  const [customWallLoaded, setCustomWallLoaded] = useState<boolean>(false);
+  const [customWallName, setCustomWallName] = useState<string>('');
+  const [customWallSize, setCustomWallSize] = useState<number>(0);
+  const [wallScale, setWallScale] = useState<number>(1.0);
+  const [wallOffsetX, setWallOffsetX] = useState<number>(0.0);
+  const [wallOffsetY, setWallOffsetY] = useState<number>(0.0);
+  const [wallOffsetZ, setWallOffsetZ] = useState<number>(0.0);
+  const [wallRotationY, setWallRotationY] = useState<number>(0);
+  const [showLeftWall, setShowLeftWall] = useState<boolean>(true);
+  const [showUpperWall, setShowUpperWall] = useState<boolean>(true);
+
+  // Door GLB state (center of left wall at 0°, center of upper wall at -90°)
+  const [customDoorLoaded, setCustomDoorLoaded] = useState<boolean>(false);
+  const [customDoorName, setCustomDoorName] = useState<string>('');
+  const [customDoorSize, setCustomDoorSize] = useState<number>(0);
+  const [doorScale, setDoorScale] = useState<number>(1.0);
+  const [doorOffsetX, setDoorOffsetX] = useState<number>(0.0);
+  const [doorOffsetY, setDoorOffsetY] = useState<number>(0.0);
+  const [doorOffsetZ, setDoorOffsetZ] = useState<number>(0.0);
+  const [doorRotationY, setDoorRotationY] = useState<number>(0);
+  const [showLeftDoor, setShowLeftDoor] = useState<boolean>(true);
+  const [showUpperDoor, setShowUpperDoor] = useState<boolean>(false);
+
+  const customFloorLoadedRef = useRef<boolean>(false);
+  useEffect(() => {
+    customFloorLoadedRef.current = customFloorLoaded;
+  }, [customFloorLoaded]);
+
+  const floorOffsetYRef = useRef<number>(0.0);
+  useEffect(() => {
+    floorOffsetYRef.current = floorOffsetY;
+  }, [floorOffsetY]);
 
   // Animation clips found in GLB
   const [availableClips, setAvailableClips] = useState<string[]>([]);
@@ -123,14 +548,34 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     moveSpeedRef.current = moveSpeed;
   }, [moveSpeed]);
 
+  // Dynamic Tile and Surface parameters
+  const currentTileSizeRef = useRef<number>(TILE_SIZE);
+  const currentSurfaceYRef = useRef<number>(0.05);
+
+  useEffect(() => {
+    currentTileSizeRef.current = customFloorLoaded ? BLENDER_TILE_SIZE : TILE_SIZE;
+    currentSurfaceYRef.current = customFloorLoaded ? (0.25 + floorOffsetY) : 0.05;
+  }, [customFloorLoaded, floorOffsetY]);
+
   // Three.js mutable references
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.OrthographicCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const characterRootRef = useRef<THREE.Group | null>(null);
   const customModelInnerRef = useRef<THREE.Group | null>(null);
+  const characterNaturalHeightRef = useRef<number>(1.85);
   const tileMeshesRef = useRef<THREE.Mesh[]>([]);
   const hoverIndicatorRef = useRef<THREE.Group | null>(null);
+
+  // Scene Group References
+  const proceduralFloorGroupRef = useRef<THREE.Group | null>(null);
+  const proceduralWallGroupRef = useRef<THREE.Group | null>(null);
+  const customFloorGroupRef = useRef<THREE.Group | null>(null);
+  const customWallGroupRef = useRef<THREE.Group | null>(null);
+  const customDoorGroupRef = useRef<THREE.Group | null>(null);
+  const floorGltfSceneRef = useRef<THREE.Group | null>(null);
+  const wallGltfSceneRef = useRef<THREE.Group | null>(null);
+  const doorGltfSceneRef = useRef<THREE.Group | null>(null);
 
   // Animation mixer & clips
   const animationMixerRef = useRef<THREE.AnimationMixer | null>(null);
@@ -526,9 +971,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
 
-    // Standard character height ~1.85m
+    // Standard character height ~1.85m or true 1:1 Blender scale
     const naturalHeight = size.y || 1;
-    const baseScale = 1.85 / naturalHeight;
+    characterNaturalHeightRef.current = naturalHeight;
+    const isRawScale = config?.useRawScale !== undefined ? config.useRawScale : useRawCharacterScale;
+    const baseScale = isRawScale ? 1.0 : (1.85 / naturalHeight);
 
     // Center model at its feet
     model.position.set(-center.x, -box.min.y, -center.z);
@@ -615,22 +1062,216 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
     setCustomModelLoaded(true);
     playTactileSfx('success');
-  }, [modelScale, modelOffsetY, modelRotationY, playTactileSfx]);
+  }, [modelScale, modelOffsetY, modelRotationY, useRawCharacterScale, playTactileSfx]);
 
-  // Load a GLB File (from File input or Drag & Drop)
+  // Mount Custom Floor GLB (Blender 8m x 8m, center pivot)
+  const mountFloorGLB = useCallback((gltf: any, config?: Partial<StoredEnvironmentGLBConfig>) => {
+    if (!sceneRef.current || !customFloorGroupRef.current) return;
+
+    while (customFloorGroupRef.current.children.length > 0) {
+      customFloorGroupRef.current.remove(customFloorGroupRef.current.children[0]);
+    }
+
+    const model = gltf.scene;
+    model.name = 'UserCustomFloorScene';
+    floorGltfSceneRef.current = model;
+
+    model.traverse((child: any) => {
+      if (child.isMesh) {
+        child.castShadow = false;
+        child.receiveShadow = false;
+        child.frustumCulled = false;
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        mats.forEach((m: any) => {
+          if (m && m.map) {
+            m.map.colorSpace = THREE.SRGBColorSpace;
+            m.map.needsUpdate = true;
+          }
+        });
+      }
+    });
+
+    customFloorGroupRef.current.add(model);
+    customFloorGroupRef.current.visible = true;
+
+    const posX = config?.offsetX ?? floorOffsetX;
+    const posY = config?.offsetY ?? floorOffsetY;
+    const posZ = config?.offsetZ ?? floorOffsetZ;
+    const rotY = ((config?.rotationY ?? floorRotationY) * Math.PI) / 180;
+    const scale = config?.scale ?? floorScale;
+
+    customFloorGroupRef.current.position.set(posX, posY, posZ);
+    customFloorGroupRef.current.rotation.y = rotY;
+    customFloorGroupRef.current.scale.setScalar(scale);
+
+    // Hide procedural floor diorama
+    if (proceduralFloorGroupRef.current) {
+      proceduralFloorGroupRef.current.visible = false;
+    }
+
+    setCustomFloorLoaded(true);
+    playTactileSfx('success');
+  }, [floorOffsetX, floorOffsetY, floorOffsetZ, floorRotationY, floorScale, playTactileSfx]);
+
+  // Mount Custom Wall GLB (Blender 8m x 0.5m x 4m, floor-center pivot)
+  const mountWallGLB = useCallback((gltf: any, config?: Partial<StoredEnvironmentGLBConfig>) => {
+    if (!sceneRef.current || !customWallGroupRef.current) return;
+
+    while (customWallGroupRef.current.children.length > 0) {
+      customWallGroupRef.current.remove(customWallGroupRef.current.children[0]);
+    }
+
+    const baseModel = gltf.scene;
+    baseModel.name = 'UserCustomWallBase';
+    wallGltfSceneRef.current = baseModel;
+
+    baseModel.traverse((child: any) => {
+      if (child.isMesh) {
+        child.castShadow = false;
+        child.receiveShadow = false;
+        child.frustumCulled = false;
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        mats.forEach((m: any) => {
+          if (m && m.map) {
+            m.map.colorSpace = THREE.SRGBColorSpace;
+            m.map.needsUpdate = true;
+          }
+        });
+      }
+    });
+
+    const posX = config?.offsetX ?? wallOffsetX;
+    const posY = config?.offsetY ?? wallOffsetY;
+    const posZ = config?.offsetZ ?? wallOffsetZ;
+    const baseRotY = ((config?.rotationY ?? wallRotationY) * Math.PI) / 180;
+    const scale = config?.scale ?? wallScale;
+    const leftActive = config?.showLeftWall !== undefined ? config.showLeftWall : showLeftWall;
+    const upperActive = config?.showUpperWall !== undefined ? config.showUpperWall : showUpperWall;
+
+    // 1. Left_Wall: stands on the left side (rotation 0)
+    if (leftActive) {
+      const leftWall = baseModel.clone(true);
+      leftWall.name = 'Left_Wall';
+      leftWall.position.set(0, 0, 0);
+      leftWall.rotation.set(0, 0, 0);
+      customWallGroupRef.current.add(leftWall);
+    }
+
+    // 2. Upper_Wall: rotated -90° (-Math.PI / 2) around floor center pivot to stand on the upper side
+    if (upperActive) {
+      const upperWall = baseModel.clone(true);
+      upperWall.name = 'Upper_Wall';
+      upperWall.position.set(0, 0, 0);
+      upperWall.rotation.set(0, -Math.PI / 2, 0);
+      customWallGroupRef.current.add(upperWall);
+    }
+
+    customWallGroupRef.current.position.set(posX, posY, posZ);
+    customWallGroupRef.current.rotation.y = baseRotY;
+    customWallGroupRef.current.scale.setScalar(scale);
+    customWallGroupRef.current.visible = true;
+
+    // Hide procedural walls
+    if (proceduralWallGroupRef.current) {
+      proceduralWallGroupRef.current.visible = false;
+    }
+
+    setCustomWallLoaded(true);
+    playTactileSfx('success');
+  }, [wallOffsetX, wallOffsetY, wallOffsetZ, wallRotationY, wallScale, showLeftWall, showUpperWall, playTactileSfx]);
+
+  const mountFloorGLBRef = useRef(mountFloorGLB);
+  useEffect(() => {
+    mountFloorGLBRef.current = mountFloorGLB;
+  }, [mountFloorGLB]);
+
+  const mountWallGLBRef = useRef(mountWallGLB);
+  useEffect(() => {
+    mountWallGLBRef.current = mountWallGLB;
+  }, [mountWallGLB]);
+
+  // Mount Custom Door GLB (in center of left wall at 0°, rotated -90° for upper wall)
+  const mountDoorGLB = useCallback((gltf: any, config?: Partial<StoredEnvironmentGLBConfig>) => {
+    if (!sceneRef.current || !customDoorGroupRef.current) return;
+
+    while (customDoorGroupRef.current.children.length > 0) {
+      customDoorGroupRef.current.remove(customDoorGroupRef.current.children[0]);
+    }
+
+    const baseModel = gltf.scene;
+    baseModel.name = 'UserCustomDoorBase';
+    doorGltfSceneRef.current = baseModel;
+
+    baseModel.traverse((child: any) => {
+      if (child.isMesh) {
+        child.castShadow = false;
+        child.receiveShadow = false;
+        child.frustumCulled = false;
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        mats.forEach((m: any) => {
+          if (m && m.map) {
+            m.map.colorSpace = THREE.SRGBColorSpace;
+            m.map.needsUpdate = true;
+          }
+        });
+      }
+    });
+
+    const posX = config?.offsetX ?? doorOffsetX;
+    const posY = config?.offsetY ?? doorOffsetY;
+    const posZ = config?.offsetZ ?? doorOffsetZ;
+    const baseRotY = ((config?.rotationY ?? doorRotationY) * Math.PI) / 180;
+    const scale = config?.scale ?? doorScale;
+    const leftActive = config?.showLeftDoor !== undefined ? config.showLeftDoor : showLeftDoor;
+    const upperActive = config?.showUpperDoor !== undefined ? config.showUpperDoor : showUpperDoor;
+
+    // 1. Left_Door: positioned in the center of the left wall (rotation 0)
+    if (leftActive) {
+      const leftDoor = baseModel.clone(true);
+      leftDoor.name = 'Left_Door';
+      leftDoor.position.set(0, 0, 0);
+      leftDoor.rotation.set(0, 0, 0);
+      customDoorGroupRef.current.add(leftDoor);
+    }
+
+    // 2. Upper_Door: rotated -90° around floor center pivot to appear in the center of the upper wall
+    if (upperActive) {
+      const upperDoor = baseModel.clone(true);
+      upperDoor.name = 'Upper_Door';
+      upperDoor.position.set(0, 0, 0);
+      upperDoor.rotation.set(0, -Math.PI / 2, 0);
+      customDoorGroupRef.current.add(upperDoor);
+    }
+
+    customDoorGroupRef.current.position.set(posX, posY, posZ);
+    customDoorGroupRef.current.rotation.y = baseRotY;
+    customDoorGroupRef.current.scale.setScalar(scale);
+    customDoorGroupRef.current.visible = true;
+
+    setCustomDoorLoaded(true);
+    playTactileSfx('success');
+  }, [doorOffsetX, doorOffsetY, doorOffsetZ, doorRotationY, doorScale, showLeftDoor, showUpperDoor, playTactileSfx]);
+
+  const mountDoorGLBRef = useRef(mountDoorGLB);
+  useEffect(() => {
+    mountDoorGLBRef.current = mountDoorGLB;
+  }, [mountDoorGLB]);
+
+  // Load Character GLB File
   const processGLBFile = useCallback(async (file: File) => {
     setIsLoadingModel(true);
+    setLoadingMessage(`Lade Charakter-Modell "${file.name}"...`);
     try {
       const arrayBuffer = await file.arrayBuffer();
       const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
 
-      // Parse with Three.js GLTFLoader
       const loader = new GLTFLoader();
       loader.parse(arrayBuffer, '', async (gltf) => {
         mountGLBModel(gltf, {
           fileName: file.name,
           fileSize: file.size,
           scale: 1.0,
+          useRawScale: useRawCharacterScale,
           offsetY: 0.0,
           rotationY: 0.0
         });
@@ -641,13 +1282,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         setModelOffsetY(0.0);
         setModelRotationY(0);
 
-        // Persist to IndexedDB so it stays active across reloads
         try {
-          await setItem(STORAGE_KEY_GLB, {
+          await setItem(STORAGE_KEY_CHAR_GLB, {
             fileName: file.name,
             fileSize: file.size,
             dataBase64: base64DataUrl,
             scale: 1.0,
+            useRawScale: useRawCharacterScale,
             offsetY: 0.0,
             rotationY: 0.0
           });
@@ -666,7 +1307,183 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       alert("Fehler beim Laden der Datei: " + err.message);
       setIsLoadingModel(false);
     }
-  }, [mountGLBModel]);
+  }, [mountGLBModel, useRawCharacterScale]);
+
+  // Load Floor Chunk GLB File (8m x 8m)
+  const processFloorGLBFile = useCallback(async (file: File) => {
+    setIsLoadingModel(true);
+    setLoadingMessage(`Lade Bodenplatte "${file.name}" (8x8m)...`);
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+
+      const loader = new GLTFLoader();
+      loader.parse(arrayBuffer, '', async (gltf) => {
+        mountFloorGLB(gltf, {
+          fileName: file.name,
+          fileSize: file.size,
+          scale: 1.0,
+          offsetX: 0.0,
+          offsetY: 0.0,
+          offsetZ: 0.0,
+          rotationY: 0.0
+        });
+
+        setCustomFloorName(file.name);
+        setCustomFloorSize(file.size);
+        setFloorScale(1.0);
+        setFloorOffsetX(0.0);
+        setFloorOffsetY(0.0);
+        setFloorOffsetZ(0.0);
+        setFloorRotationY(0);
+
+        try {
+          await setItem(STORAGE_KEY_FLOOR_GLB, {
+            fileName: file.name,
+            fileSize: file.size,
+            dataBase64: base64DataUrl,
+            scale: 1.0,
+            offsetX: 0.0,
+            offsetY: 0.0,
+            offsetZ: 0.0,
+            rotationY: 0.0
+          });
+        } catch (storageErr) {
+          console.warn("Could not save Floor GLB to IndexedDB:", storageErr);
+        }
+
+        setIsLoadingModel(false);
+      }, (err) => {
+        console.error("Floor GLTF parse error:", err);
+        alert("Fehler beim Einlesen der Bodenplatten-GLB: " + err.message);
+        setIsLoadingModel(false);
+      });
+    } catch (err: any) {
+      console.error("Floor file read error:", err);
+      alert("Fehler beim Laden der Datei: " + err.message);
+      setIsLoadingModel(false);
+    }
+  }, [mountFloorGLB]);
+
+  // Load Wall GLB File (8m length, 4m height)
+  const processWallGLBFile = useCallback(async (file: File) => {
+    setIsLoadingModel(true);
+    setLoadingMessage(`Lade Wand "${file.name}" (8m)...`);
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+
+      const loader = new GLTFLoader();
+      loader.parse(arrayBuffer, '', async (gltf) => {
+        mountWallGLB(gltf, {
+          fileName: file.name,
+          fileSize: file.size,
+          scale: 1.0,
+          offsetX: 0.0,
+          offsetY: 0.0,
+          offsetZ: 0.0,
+          rotationY: 0.0,
+          showLeftWall: showLeftWall,
+          showUpperWall: showUpperWall
+        });
+
+        setCustomWallName(file.name);
+        setCustomWallSize(file.size);
+        setWallScale(1.0);
+        setWallOffsetX(0.0);
+        setWallOffsetY(0.0);
+        setWallOffsetZ(0.0);
+        setWallRotationY(0);
+
+        try {
+          await setItem(STORAGE_KEY_WALL_GLB, {
+            fileName: file.name,
+            fileSize: file.size,
+            dataBase64: base64DataUrl,
+            scale: 1.0,
+            offsetX: 0.0,
+            offsetY: 0.0,
+            offsetZ: 0.0,
+            rotationY: 0.0,
+            showLeftWall: showLeftWall,
+            showUpperWall: showUpperWall
+          });
+        } catch (storageErr) {
+          console.warn("Could not save Wall GLB to IndexedDB:", storageErr);
+        }
+
+        setIsLoadingModel(false);
+      }, (err) => {
+        console.error("Wall GLTF parse error:", err);
+        alert("Fehler beim Einlesen der Wand-GLB: " + err.message);
+        setIsLoadingModel(false);
+      });
+    } catch (err: any) {
+      console.error("Wall file read error:", err);
+      alert("Fehler beim Laden der Datei: " + err.message);
+      setIsLoadingModel(false);
+    }
+  }, [mountWallGLB, showLeftWall, showUpperWall]);
+
+  // Load Door GLB File (center of left wall at 0°, center of upper wall at -90°)
+  const processDoorGLBFile = useCallback(async (file: File) => {
+    setIsLoadingModel(true);
+    setLoadingMessage(`Lade Tür-Modell "${file.name}"...`);
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+
+      const loader = new GLTFLoader();
+      loader.parse(arrayBuffer, '', async (gltf) => {
+        mountDoorGLB(gltf, {
+          fileName: file.name,
+          fileSize: file.size,
+          scale: 1.0,
+          offsetX: 0.0,
+          offsetY: 0.0,
+          offsetZ: 0.0,
+          rotationY: 0.0,
+          showLeftDoor: showLeftDoor,
+          showUpperDoor: showUpperDoor
+        });
+
+        setCustomDoorName(file.name);
+        setCustomDoorSize(file.size);
+        setDoorScale(1.0);
+        setDoorOffsetX(0.0);
+        setDoorOffsetY(0.0);
+        setDoorOffsetZ(0.0);
+        setDoorRotationY(0);
+
+        try {
+          await setItem(STORAGE_KEY_DOOR_GLB, {
+            fileName: file.name,
+            fileSize: file.size,
+            dataBase64: base64DataUrl,
+            scale: 1.0,
+            offsetX: 0.0,
+            offsetY: 0.0,
+            offsetZ: 0.0,
+            rotationY: 0.0,
+            showLeftDoor: showLeftDoor,
+            showUpperDoor: showUpperDoor
+          });
+        } catch (storageErr) {
+          console.warn("Could not save Door GLB to IndexedDB:", storageErr);
+        }
+
+        setIsLoadingModel(false);
+      }, (err) => {
+        console.error("Door GLTF parse error:", err);
+        alert("Fehler beim Einlesen der Tür-GLB: " + err.message);
+        setIsLoadingModel(false);
+      });
+    } catch (err: any) {
+      console.error("Door file read error:", err);
+      alert("Fehler beim Laden der Tür-Datei: " + err.message);
+      setIsLoadingModel(false);
+    }
+  }, [mountDoorGLB, showLeftDoor, showUpperDoor]);
 
   // Load a character's 3D model from the project
   const loadCharacterFromProject = useCallback(async (char: Character) => {
@@ -675,6 +1492,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       return;
     }
     setIsLoadingModel(true);
+    setLoadingMessage(`Lade 3D-Modell für ${char.name}...`);
     try {
       const dataUrl = await loadImage(char.model3dSrc);
       if (!dataUrl) {
@@ -688,6 +1506,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         mountGLBModel(gltf, {
           fileName: `${char.name}.glb`,
           scale: char.model3dScale ?? 1.0,
+          useRawScale: useRawCharacterScale,
           offsetY: char.model3dOffsetY ?? 0.0,
           rotationY: char.model3dRotationY ?? 0.0,
         });
@@ -699,12 +1518,12 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       console.error("Failed to load character GLB:", err);
       setIsLoadingModel(false);
     }
-  }, [mountGLBModel]);
+  }, [mountGLBModel, useRawCharacterScale]);
 
   // Revert to built-in Anime Knight Dummy
   const handleResetToDummy = useCallback(async () => {
     try {
-      await setItem(STORAGE_KEY_GLB, null);
+      await setItem(STORAGE_KEY_CHAR_GLB, null);
     } catch (e) {
       console.warn("IDB clear error", e);
     }
@@ -737,14 +1556,219 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     playTactileSfx('click');
   }, [createAnimeKnightDummy, playTactileSfx]);
 
+  // Revert Floor to procedural diorama
+  const handleResetFloor = useCallback(async () => {
+    try {
+      await setItem(STORAGE_KEY_FLOOR_GLB, null);
+    } catch (e) {
+      console.warn("IDB clear error", e);
+    }
+    if (customFloorGroupRef.current) {
+      while (customFloorGroupRef.current.children.length > 0) {
+        customFloorGroupRef.current.remove(customFloorGroupRef.current.children[0]);
+      }
+      customFloorGroupRef.current.visible = false;
+    }
+    if (proceduralFloorGroupRef.current) {
+      proceduralFloorGroupRef.current.visible = true;
+    }
+    floorGltfSceneRef.current = null;
+    setCustomFloorLoaded(false);
+    setCustomFloorName('');
+    setCustomFloorSize(0);
+    setFloorScale(1.0);
+    setFloorOffsetX(0.0);
+    setFloorOffsetY(0.0);
+    setFloorOffsetZ(0.0);
+    setFloorRotationY(0);
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
+  // Revert Wall to procedural walls
+  const handleResetWall = useCallback(async () => {
+    try {
+      await setItem(STORAGE_KEY_WALL_GLB, null);
+    } catch (e) {
+      console.warn("IDB clear error", e);
+    }
+    if (customWallGroupRef.current) {
+      while (customWallGroupRef.current.children.length > 0) {
+        customWallGroupRef.current.remove(customWallGroupRef.current.children[0]);
+      }
+      customWallGroupRef.current.visible = false;
+    }
+    if (proceduralWallGroupRef.current) {
+      proceduralWallGroupRef.current.visible = true;
+    }
+    wallGltfSceneRef.current = null;
+    setCustomWallLoaded(false);
+    setCustomWallName('');
+    setCustomWallSize(0);
+    setWallScale(1.0);
+    setWallOffsetX(0.0);
+    setWallOffsetY(0.0);
+    setWallOffsetZ(0.0);
+    setWallRotationY(0);
+    setShowLeftWall(true);
+    setShowUpperWall(true);
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
+  // Toggle individual walls (Left_Wall and Upper_Wall)
+  const toggleLeftWall = useCallback(() => {
+    setShowLeftWall(prev => {
+      const next = !prev;
+      getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_WALL_GLB).then(stored => {
+        if (stored) setItem(STORAGE_KEY_WALL_GLB, { ...stored, showLeftWall: next });
+      }).catch(err => console.warn(err));
+      return next;
+    });
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
+  const toggleUpperWall = useCallback(() => {
+    setShowUpperWall(prev => {
+      const next = !prev;
+      getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_WALL_GLB).then(stored => {
+        if (stored) setItem(STORAGE_KEY_WALL_GLB, { ...stored, showUpperWall: next });
+      }).catch(err => console.warn(err));
+      return next;
+    });
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
+  // Remove Door GLB
+  const handleResetDoor = useCallback(async () => {
+    try {
+      await setItem(STORAGE_KEY_DOOR_GLB, null);
+    } catch (e) {
+      console.warn("IDB clear door error", e);
+    }
+    if (customDoorGroupRef.current) {
+      while (customDoorGroupRef.current.children.length > 0) {
+        customDoorGroupRef.current.remove(customDoorGroupRef.current.children[0]);
+      }
+      customDoorGroupRef.current.visible = false;
+    }
+    doorGltfSceneRef.current = null;
+    setCustomDoorLoaded(false);
+    setCustomDoorName('');
+    setCustomDoorSize(0);
+    setDoorScale(1.0);
+    setDoorOffsetX(0.0);
+    setDoorOffsetY(0.0);
+    setDoorOffsetZ(0.0);
+    setDoorRotationY(0);
+    setShowLeftDoor(true);
+    setShowUpperDoor(false);
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
+  // Toggle individual doors (Left_Door and Upper_Door)
+  const toggleLeftDoor = useCallback(() => {
+    setShowLeftDoor(prev => {
+      const next = !prev;
+      getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_DOOR_GLB).then(stored => {
+        if (stored) setItem(STORAGE_KEY_DOOR_GLB, { ...stored, showLeftDoor: next });
+      }).catch(err => console.warn(err));
+      return next;
+    });
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
+  const toggleUpperDoor = useCallback(() => {
+    setShowUpperDoor(prev => {
+      const next = !prev;
+      getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_DOOR_GLB).then(stored => {
+        if (stored) setItem(STORAGE_KEY_DOOR_GLB, { ...stored, showUpperDoor: next });
+      }).catch(err => console.warn(err));
+      return next;
+    });
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
   // Apply real-time Model Adjustments (Scale, Offset Y, Rotation Y)
   useEffect(() => {
     if (!customModelInnerRef.current) return;
-    const baseHeight = 1.85; // normalized height
-    customModelInnerRef.current.scale.setScalar(modelScale);
+    const baseScale = useRawCharacterScale ? 1.0 : (1.85 / (characterNaturalHeightRef.current || 1.85));
+    customModelInnerRef.current.scale.setScalar(baseScale * modelScale);
     customModelInnerRef.current.position.y = modelOffsetY;
     customModelInnerRef.current.rotation.y = (modelRotationY * Math.PI) / 180;
-  }, [modelScale, modelOffsetY, modelRotationY]);
+  }, [modelScale, modelOffsetY, modelRotationY, useRawCharacterScale]);
+
+  // Synchronize Floor transform in real time
+  useEffect(() => {
+    if (!customFloorGroupRef.current) return;
+    customFloorGroupRef.current.position.set(floorOffsetX, floorOffsetY, floorOffsetZ);
+    customFloorGroupRef.current.rotation.y = (floorRotationY * Math.PI) / 180;
+    customFloorGroupRef.current.scale.setScalar(floorScale);
+  }, [floorOffsetX, floorOffsetY, floorOffsetZ, floorRotationY, floorScale]);
+
+  // Synchronize Wall transform in real time
+  useEffect(() => {
+    if (!customWallGroupRef.current) return;
+    customWallGroupRef.current.position.set(wallOffsetX, wallOffsetY, wallOffsetZ);
+    customWallGroupRef.current.rotation.y = (wallRotationY * Math.PI) / 180;
+    customWallGroupRef.current.scale.setScalar(wallScale);
+  }, [wallOffsetX, wallOffsetY, wallOffsetZ, wallRotationY, wallScale]);
+
+  // Re-build wall instances if showLeftWall or showUpperWall changes
+  useEffect(() => {
+    if (!wallGltfSceneRef.current || !customWallLoaded) return;
+    mountWallGLBRef.current({ scene: wallGltfSceneRef.current });
+  }, [showLeftWall, showUpperWall, customWallLoaded]);
+
+  // Synchronize Door transform in real time
+  useEffect(() => {
+    if (!customDoorGroupRef.current) return;
+    customDoorGroupRef.current.position.set(doorOffsetX, doorOffsetY, doorOffsetZ);
+    customDoorGroupRef.current.rotation.y = (doorRotationY * Math.PI) / 180;
+    customDoorGroupRef.current.scale.setScalar(doorScale);
+  }, [doorOffsetX, doorOffsetY, doorOffsetZ, doorRotationY, doorScale]);
+
+  // Re-build door instances if showLeftDoor or showUpperDoor changes
+  useEffect(() => {
+    if (!doorGltfSceneRef.current || !customDoorLoaded) return;
+    mountDoorGLBRef.current({ scene: doorGltfSceneRef.current });
+  }, [showLeftDoor, showUpperDoor, customDoorLoaded]);
+
+  // Dynamic Tile Position Helper based on active Floor Size (8m vs 7.2m) and Surface Height
+  const getTileWorldPos = useCallback((col: number, row: number) => {
+    const tSize = customFloorLoadedRef.current ? (8.0 / 3) : TILE_SIZE;
+    const sY = customFloorLoadedRef.current ? (0.25 + floorOffsetYRef.current) : 0.05;
+    return new THREE.Vector3((col - 1) * tSize, sY, (row - 1) * tSize);
+  }, []);
+
+  const getTileWorldPosRef = useRef(getTileWorldPos);
+  useEffect(() => {
+    getTileWorldPosRef.current = getTileWorldPos;
+  }, [getTileWorldPos]);
+
+  // Synchronize 3x3 clickable floor tiles when custom floor is loaded or offset Y changes
+  useEffect(() => {
+    const tSize = customFloorLoaded ? (8.0 / 3) : TILE_SIZE;
+    const sY = customFloorLoaded ? (0.25 + floorOffsetY) : 0.05;
+
+    tileMeshesRef.current.forEach((tMesh) => {
+      const col = tMesh.userData.col;
+      const row = tMesh.userData.row;
+      const x = (col - 1) * tSize;
+      const z = (row - 1) * tSize;
+      tMesh.position.set(x, sY + 0.015, z);
+      tMesh.geometry.dispose();
+      tMesh.geometry = new THREE.PlaneGeometry(tSize - 0.06, tSize - 0.06);
+    });
+
+    // If standing still, update character Y position so it rests flush on the floor surface
+    if (characterRootRef.current && targetWorldPosRef.current === null) {
+      const col = currentTileRef.current.col;
+      const row = currentTileRef.current.row;
+      const x = (col - 1) * tSize;
+      const z = (row - 1) * tSize;
+      characterPosRef.current.set(x, sY, z);
+      characterRootRef.current.position.set(x, sY, z);
+    }
+  }, [customFloorLoaded, floorOffsetY]);
 
   // Compute direction angle (in radians) between 2 tiles
   const getCardinalAngle = (from: TileCoord, to: TileCoord): { angle: number; dir: Direction } => {
@@ -788,8 +1812,6 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       return;
     }
 
-    playTactileSfx('click');
-
     const waypoints = planPath(current, { col: targetCol, row: targetRow });
     if (waypoints.length === 0) return;
 
@@ -807,20 +1829,21 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     setAnimState('RUN');
     updateMovementAnimation(true);
 
-    targetWorldPosRef.current = tileToWorld(firstStep.col, firstStep.row);
-  }, [playTactileSfx, updateMovementAnimation]);
+    targetWorldPosRef.current = getTileWorldPos(firstStep.col, firstStep.row);
+  }, [playTactileSfx, updateMovementAnimation, getTileWorldPos]);
 
   // Reset character to (1,1) Center Tile
   const resetToCenter = useCallback(() => {
     moveQueueRef.current = [];
     currentTileRef.current = { col: 1, row: 1 };
     targetWorldPosRef.current = null;
-    characterPosRef.current.set(0, 0.05, 0);
+    const centerPos = getTileWorldPos(1, 1);
+    characterPosRef.current.copy(centerPos);
     targetFacingAngleRef.current = 0;
     currentFacingAngleRef.current = 0;
 
     if (characterRootRef.current) {
-      characterRootRef.current.position.set(0, 0.05, 0);
+      characterRootRef.current.position.copy(centerPos);
       characterRootRef.current.rotation.y = 0;
     }
 
@@ -829,7 +1852,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     setAnimState('IDLE');
     updateMovementAnimation(false);
     playTactileSfx('click');
-  }, [playTactileSfx, updateMovementAnimation]);
+  }, [playTactileSfx, updateMovementAnimation, getTileWorldPos]);
 
   const handleTileClickRef = useRef(handleTileClick);
   useEffect(() => {
@@ -897,6 +1920,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     scene.add(fillLight);
 
     // 5. Stylized Diorama Platform Slab & Floor
+    const proceduralFloorGroup = new THREE.Group();
+    proceduralFloorGroup.name = 'ProceduralFloorGroup';
+
     const plinthHeight = 1.1;
     const plinthGeo = new THREE.CylinderGeometry(
       PLATFORM_HALF * Math.SQRT2,
@@ -910,13 +1936,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const plinthMat = new THREE.MeshLambertMaterial({ color: 0x3d3b38 });
     const plinthMesh = new THREE.Mesh(plinthGeo, plinthMat);
     plinthMesh.position.y = -plinthHeight / 2;
-    scene.add(plinthMesh);
+    proceduralFloorGroup.add(plinthMesh);
 
     const curbGeo = new THREE.BoxGeometry(PLATFORM_HALF * 2 + 0.16, 0.22, PLATFORM_HALF * 2 + 0.16);
     const curbMat = new THREE.MeshLambertMaterial({ color: 0x4a4744 });
     const curbMesh = new THREE.Mesh(curbGeo, curbMat);
     curbMesh.position.y = -0.11;
-    scene.add(curbMesh);
+    proceduralFloorGroup.add(curbMesh);
 
     const floorCanvas = createStylizedFloorCanvas();
     const floorTexture = new THREE.CanvasTexture(floorCanvas);
@@ -927,7 +1953,28 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const floorMesh = new THREE.Mesh(floorGeo, floorMat);
     floorMesh.rotation.x = -Math.PI / 2;
     floorMesh.position.y = 0.005;
-    scene.add(floorMesh);
+    proceduralFloorGroup.add(floorMesh);
+
+    scene.add(proceduralFloorGroup);
+    proceduralFloorGroupRef.current = proceduralFloorGroup;
+
+    // Custom 3D Floor Group (for user Blender 8x8m GLB)
+    const customFloorGroup = new THREE.Group();
+    customFloorGroup.name = 'CustomFloorGroup';
+    scene.add(customFloorGroup);
+    customFloorGroupRef.current = customFloorGroup;
+
+    // Custom 3D Wall Group (for user Blender 8m GLB, Left & Upper)
+    const customWallGroup = new THREE.Group();
+    customWallGroup.name = 'CustomWallGroup';
+    scene.add(customWallGroup);
+    customWallGroupRef.current = customWallGroup;
+
+    // Custom 3D Door Group (for user Blender Door GLB, Left & Upper)
+    const customDoorGroup = new THREE.Group();
+    customDoorGroup.name = 'CustomDoorGroup';
+    scene.add(customDoorGroup);
+    customDoorGroupRef.current = customDoorGroup;
 
     // 6. 3x3 Clickable Floor Tile Grid
     tileMeshesRef.current = [];
@@ -955,40 +2002,17 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     }
     scene.add(tilesGroup);
 
-    // 7. Dynamic Hover Indicator: Magical Fantasy Runic Ring
+    // 7. Dynamic Hover Indicator: Transparent Light-Blue Surface (2.67m x 2.67m tile)
     const hoverGroup = new THREE.Group();
     hoverGroup.visible = false;
     hoverIndicatorRef.current = hoverGroup;
 
-    const runeRingGeo = new THREE.RingGeometry(0.85, 0.95, 48);
-    const runeRingMat = new THREE.MeshBasicMaterial({
-      color: 0x38bdf8,
-      transparent: true,
-      opacity: 0.85,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
-    const runeRing = new THREE.Mesh(runeRingGeo, runeRingMat);
-    runeRing.rotation.x = -Math.PI / 2;
-    hoverGroup.add(runeRing);
-
-    const innerRingGeo = new THREE.RingGeometry(0.68, 0.72, 36);
-    const innerRingMat = new THREE.MeshBasicMaterial({
-      color: 0xfacc15,
-      transparent: true,
-      opacity: 0.75,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
-    const innerRing = new THREE.Mesh(innerRingGeo, innerRingMat);
-    innerRing.rotation.x = -Math.PI / 2;
-    hoverGroup.add(innerRing);
-
-    const tileWashGeo = new THREE.PlaneGeometry(TILE_SIZE - 0.1, TILE_SIZE - 0.1);
+    // Tile Wash Plane: Exactly 2.67m x 2.67m (2.64m with 3cm margin)
+    const tileWashGeo = new THREE.PlaneGeometry(2.64, 2.64);
     const tileWashMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
       transparent: true,
-      opacity: 0.12,
+      opacity: 0.16,
       depthWrite: false
     });
     const tileWash = new THREE.Mesh(tileWashGeo, tileWashMat);
@@ -999,6 +2023,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     scene.add(hoverGroup);
 
     // 8. Architectural Walls & Arched Doorway (North & East Walls)
+    const proceduralWallGroup = new THREE.Group();
+    proceduralWallGroup.name = 'ProceduralWallGroup';
+
     const wallCanvas = createStylizedWallCanvas();
     const wallTexture = new THREE.CanvasTexture(wallCanvas);
     wallTexture.colorSpace = THREE.SRGBColorSpace;
@@ -1008,25 +2035,25 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const northWallGeo = new THREE.BoxGeometry(PLATFORM_HALF * 2, WALL_HEIGHT, WALL_THICKNESS);
     const northWall = new THREE.Mesh(northWallGeo, wallMat);
     northWall.position.set(0, WALL_HEIGHT / 2, -PLATFORM_HALF - WALL_THICKNESS / 2);
-    scene.add(northWall);
+    proceduralWallGroup.add(northWall);
 
     const baseboardGeo = new THREE.BoxGeometry(PLATFORM_HALF * 2 + 0.1, 0.28, 0.18);
     const northBaseboard = new THREE.Mesh(baseboardGeo, trimStoneMat);
     northBaseboard.position.set(0, 0.14, -PLATFORM_HALF + 0.09);
-    scene.add(northBaseboard);
+    proceduralWallGroup.add(northBaseboard);
 
     const northCorniceGeo = new THREE.BoxGeometry(PLATFORM_HALF * 2 + 0.35, 0.35, WALL_THICKNESS + 0.35);
     const northCornice = new THREE.Mesh(northCorniceGeo, trimStoneMat);
     northCornice.position.set(0, WALL_HEIGHT + 0.175, -PLATFORM_HALF - WALL_THICKNESS / 2);
-    scene.add(northCornice);
+    proceduralWallGroup.add(northCornice);
 
     const jambColGeo = new THREE.CylinderGeometry(0.18, 0.22, 2.7, 24);
     const jambL = new THREE.Mesh(jambColGeo, trimStoneMat);
     jambL.position.set(-0.95, 1.35, -PLATFORM_HALF + 0.08);
     const jambR = new THREE.Mesh(jambColGeo, trimStoneMat);
     jambR.position.set(0.95, 1.35, -PLATFORM_HALF + 0.08);
-    scene.add(jambL);
-    scene.add(jambR);
+    proceduralWallGroup.add(jambL);
+    proceduralWallGroup.add(jambR);
 
     const archShape = new THREE.Shape();
     const outerR = 1.15;
@@ -1047,12 +2074,12 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const archGeo = new THREE.ExtrudeGeometry(archShape, extrudeSettings);
     const archMesh = new THREE.Mesh(archGeo, trimStoneMat);
     archMesh.position.set(0, 2.7, -PLATFORM_HALF + 0.02);
-    scene.add(archMesh);
+    proceduralWallGroup.add(archMesh);
 
     const keystoneGeo = new THREE.BoxGeometry(0.32, 0.42, 0.28);
     const keystone = new THREE.Mesh(keystoneGeo, trimStoneMat);
     keystone.position.set(0, 3.82, -PLATFORM_HALF + 0.12);
-    scene.add(keystone);
+    proceduralWallGroup.add(keystone);
 
     const doorCanvas = createStylizedDoorCanvas();
     const doorTexture = new THREE.CanvasTexture(doorCanvas);
@@ -1079,39 +2106,39 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
     const doorMesh = new THREE.Mesh(doorGeo, doorMat);
     doorMesh.position.set(0, 0, -PLATFORM_HALF + 0.02);
-    scene.add(doorMesh);
+    proceduralWallGroup.add(doorMesh);
 
     const ringGeo = new THREE.TorusGeometry(0.12, 0.025, 16, 24);
     const ringMat = new THREE.MeshLambertMaterial({ color: 0x475569 });
     const ringMesh = new THREE.Mesh(ringGeo, ringMat);
     ringMesh.position.set(-0.35, 1.35, -PLATFORM_HALF + 0.08);
-    scene.add(ringMesh);
+    proceduralWallGroup.add(ringMesh);
 
     // East Wall
     const eastWallGeo = new THREE.BoxGeometry(WALL_THICKNESS, WALL_HEIGHT, PLATFORM_HALF * 2 + WALL_THICKNESS);
     const eastWall = new THREE.Mesh(eastWallGeo, wallMat);
     eastWall.position.set(PLATFORM_HALF + WALL_THICKNESS / 2, WALL_HEIGHT / 2, -WALL_THICKNESS / 2);
-    scene.add(eastWall);
+    proceduralWallGroup.add(eastWall);
 
     const eastBaseboardGeo = new THREE.BoxGeometry(0.18, 0.28, PLATFORM_HALF * 2 + 0.1);
     const eastBaseboard = new THREE.Mesh(eastBaseboardGeo, trimStoneMat);
     eastBaseboard.position.set(PLATFORM_HALF - 0.09, 0.14, 0);
-    scene.add(eastBaseboard);
+    proceduralWallGroup.add(eastBaseboard);
 
     const eastCorniceGeo = new THREE.BoxGeometry(WALL_THICKNESS + 0.35, 0.35, PLATFORM_HALF * 2 + WALL_THICKNESS + 0.35);
     const eastCornice = new THREE.Mesh(eastCorniceGeo, trimStoneMat);
     eastCornice.position.set(PLATFORM_HALF + WALL_THICKNESS / 2, WALL_HEIGHT + 0.175, -WALL_THICKNESS / 2);
-    scene.add(eastCornice);
+    proceduralWallGroup.add(eastCornice);
 
     const pilasterGeo = new THREE.CylinderGeometry(0.24, 0.28, WALL_HEIGHT, 24);
     const pilaster = new THREE.Mesh(pilasterGeo, trimStoneMat);
     pilaster.position.set(PLATFORM_HALF - 0.14, WALL_HEIGHT / 2, 0);
-    scene.add(pilaster);
+    proceduralWallGroup.add(pilaster);
 
     const capGeo = new THREE.CylinderGeometry(0.34, 0.26, 0.32, 24);
     const pilasterCap = new THREE.Mesh(capGeo, trimStoneMat);
     pilasterCap.position.set(PLATFORM_HALF - 0.14, WALL_HEIGHT - 0.16, 0);
-    scene.add(pilasterCap);
+    proceduralWallGroup.add(pilasterCap);
 
     const sconceArmCurve = new THREE.CatmullRomCurve3([
       new THREE.Vector3(PLATFORM_HALF - 0.02, 2.1, 0),
@@ -1121,32 +2148,35 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const sconceTubeGeo = new THREE.TubeGeometry(sconceArmCurve, 16, 0.035, 12, false);
     const sconceMat = new THREE.MeshLambertMaterial({ color: 0x334155 });
     const sconceArm = new THREE.Mesh(sconceTubeGeo, sconceMat);
-    scene.add(sconceArm);
+    proceduralWallGroup.add(sconceArm);
 
     const brazierGeo = new THREE.ConeGeometry(0.14, 0.18, 16, 1, true);
     const brazier = new THREE.Mesh(brazierGeo, sconceMat);
     brazier.position.set(PLATFORM_HALF - 0.38, 2.44, 0);
-    scene.add(brazier);
+    proceduralWallGroup.add(brazier);
 
     const flameGeo = new THREE.OctahedronGeometry(0.14, 2);
     const flameMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b });
     const flameMesh = new THREE.Mesh(flameGeo, flameMat);
     flameMesh.position.set(PLATFORM_HALF - 0.38, 2.58, 0);
-    scene.add(flameMesh);
+    proceduralWallGroup.add(flameMesh);
 
     const torchLight = new THREE.PointLight(0xf59e0b, 1.2, 7.5);
     torchLight.position.set(PLATFORM_HALF - 0.45, 2.65, 0);
-    scene.add(torchLight);
+    proceduralWallGroup.add(torchLight);
 
     const cornerColGeo = new THREE.CylinderGeometry(0.42, 0.46, WALL_HEIGHT + 0.35, 24);
     const cornerCol = new THREE.Mesh(cornerColGeo, trimStoneMat);
     cornerCol.position.set(PLATFORM_HALF + WALL_THICKNESS / 2, (WALL_HEIGHT + 0.35) / 2, -PLATFORM_HALF - WALL_THICKNESS / 2);
-    scene.add(cornerCol);
+    proceduralWallGroup.add(cornerCol);
 
-    // Check IndexedDB for previously stored custom GLB
+    scene.add(proceduralWallGroup);
+    proceduralWallGroupRef.current = proceduralWallGroup;
+
+    // Check IndexedDB for previously stored custom Character GLB
     const initCharacter = async () => {
       try {
-        const storedGLB = await getItem<StoredGLBConfig>(STORAGE_KEY_GLB);
+        const storedGLB = await getItem<StoredGLBConfig>(STORAGE_KEY_CHAR_GLB);
         if (storedGLB?.dataBase64) {
           const buffer = dataUrlToArrayBuffer(storedGLB.dataBase64);
           const loader = new GLTFLoader();
@@ -1154,6 +2184,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             setCustomModelName(storedGLB.fileName || 'custom_model.glb');
             setCustomModelSize(storedGLB.fileSize || 0);
             if (storedGLB.scale !== undefined) setModelScale(storedGLB.scale);
+            if (storedGLB.useRawScale !== undefined) setUseRawCharacterScale(storedGLB.useRawScale);
             if (storedGLB.offsetY !== undefined) setModelOffsetY(storedGLB.offsetY);
             if (storedGLB.rotationY !== undefined) setModelRotationY(storedGLB.rotationY);
 
@@ -1173,7 +2204,75 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       characterRootRef.current = dummy;
     };
 
+    // Check IndexedDB for previously stored Floor and Wall GLB
+    const initEnvironment = async () => {
+      // 1. Restore Custom Floor (8m x 8m)
+      try {
+        const storedFloor = await getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_FLOOR_GLB);
+        if (storedFloor?.dataBase64) {
+          const buffer = dataUrlToArrayBuffer(storedFloor.dataBase64);
+          new GLTFLoader().parse(buffer, '', (gltf) => {
+            setCustomFloorName(storedFloor.fileName || 'custom_floor.glb');
+            setCustomFloorSize(storedFloor.fileSize || 0);
+            if (storedFloor.offsetX !== undefined) setFloorOffsetX(storedFloor.offsetX);
+            if (storedFloor.offsetY !== undefined) setFloorOffsetY(storedFloor.offsetY);
+            if (storedFloor.offsetZ !== undefined) setFloorOffsetZ(storedFloor.offsetZ);
+            if (storedFloor.rotationY !== undefined) setFloorRotationY(storedFloor.rotationY);
+            if (storedFloor.scale !== undefined) setFloorScale(storedFloor.scale);
+            mountFloorGLBRef.current(gltf, storedFloor);
+          });
+        }
+      } catch (err) {
+        console.warn("Failed to restore custom floor:", err);
+      }
+
+      // 2. Restore Custom Wall (8m, North & East)
+      try {
+        const storedWall = await getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_WALL_GLB);
+        if (storedWall?.dataBase64) {
+          const buffer = dataUrlToArrayBuffer(storedWall.dataBase64);
+          new GLTFLoader().parse(buffer, '', (gltf) => {
+            setCustomWallName(storedWall.fileName || 'custom_wall.glb');
+            setCustomWallSize(storedWall.fileSize || 0);
+            if (storedWall.offsetX !== undefined) setWallOffsetX(storedWall.offsetX);
+            if (storedWall.offsetY !== undefined) setWallOffsetY(storedWall.offsetY);
+            if (storedWall.offsetZ !== undefined) setWallOffsetZ(storedWall.offsetZ);
+            if (storedWall.rotationY !== undefined) setWallRotationY(storedWall.rotationY);
+            if (storedWall.scale !== undefined) setWallScale(storedWall.scale);
+            if (storedWall.showLeftWall !== undefined) setShowLeftWall(storedWall.showLeftWall);
+            if (storedWall.showUpperWall !== undefined) setShowUpperWall(storedWall.showUpperWall);
+            mountWallGLBRef.current(gltf, storedWall);
+          });
+        }
+      } catch (err) {
+        console.warn("Failed to restore custom wall:", err);
+      }
+
+      // 3. Restore Custom Door (center of left wall, upper wall)
+      try {
+        const storedDoor = await getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_DOOR_GLB);
+        if (storedDoor?.dataBase64) {
+          const buffer = dataUrlToArrayBuffer(storedDoor.dataBase64);
+          new GLTFLoader().parse(buffer, '', (gltf) => {
+            setCustomDoorName(storedDoor.fileName || 'custom_door.glb');
+            setCustomDoorSize(storedDoor.fileSize || 0);
+            if (storedDoor.offsetX !== undefined) setDoorOffsetX(storedDoor.offsetX);
+            if (storedDoor.offsetY !== undefined) setDoorOffsetY(storedDoor.offsetY);
+            if (storedDoor.offsetZ !== undefined) setDoorOffsetZ(storedDoor.offsetZ);
+            if (storedDoor.rotationY !== undefined) setDoorRotationY(storedDoor.rotationY);
+            if (storedDoor.scale !== undefined) setDoorScale(storedDoor.scale);
+            if (storedDoor.showLeftDoor !== undefined) setShowLeftDoor(storedDoor.showLeftDoor);
+            if (storedDoor.showUpperDoor !== undefined) setShowUpperDoor(storedDoor.showUpperDoor);
+            mountDoorGLBRef.current(gltf, storedDoor);
+          });
+        }
+      } catch (err) {
+        console.warn("Failed to restore custom door:", err);
+      }
+    };
+
     initCharacter();
+    initEnvironment();
 
     // Raycaster for Tile Hover and Click
     const raycaster = new THREE.Raycaster();
@@ -1192,16 +2291,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         const col = hitTile.userData.col;
         const row = hitTile.userData.row;
 
-        setHoveredCoord((prev) => {
-          if (!prev || prev.col !== col || prev.row !== row) {
-            playTactileSfx('hover');
-          }
-          return { col, row };
-        });
+        setHoveredCoord({ col, row });
 
         if (hoverIndicatorRef.current) {
-          const wPos = tileToWorld(col, row);
-          hoverIndicatorRef.current.position.set(wPos.x, 0.035, wPos.z);
+          const wPos = getTileWorldPosRef.current(col, row);
+          hoverIndicatorRef.current.position.set(wPos.x, wPos.y + 0.005, wPos.z);
           hoverIndicatorRef.current.visible = true;
         }
         renderer.domElement.style.cursor = 'pointer';
@@ -1279,14 +2373,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             const nextStep = queue.shift()!;
             currentTileRef.current = nextStep;
             setCharacterCoord(nextStep);
-            playTactileSfx('step');
 
             if (queue.length > 0) {
               const upcoming = queue[0];
               const { angle, dir } = getCardinalAngle(nextStep, upcoming);
               targetFacingAngleRef.current = angle;
               setFacingDir(dir);
-              targetWorldPosRef.current = tileToWorld(upcoming.col, upcoming.row);
+              targetWorldPosRef.current = getTileWorldPosRef.current(upcoming.col, upcoming.row);
             } else {
               targetWorldPosRef.current = null;
               setAnimState('IDLE');
@@ -1323,10 +2416,6 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         torchLight.intensity = 1.2 + Math.sin(elapsed * 16) * 0.15;
       }
 
-      if (hoverIndicatorRef.current && hoverIndicatorRef.current.visible) {
-        runeRing.rotation.z += delta * 0.8;
-        innerRing.rotation.z -= delta * 1.2;
-      }
 
       renderer.render(scene, camera);
     };
@@ -1366,16 +2455,56 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
     const file = e.dataTransfer.files?.[0];
     if (file && (file.name.endsWith('.glb') || file.name.endsWith('.gltf'))) {
-      processGLBFile(file);
+      const lower = file.name.toLowerCase();
+      if (lower.includes('floor') || lower.includes('boden') || lower.includes('chunk')) {
+        setActiveTab('floor');
+        processFloorGLBFile(file);
+      } else if (lower.includes('door') || lower.includes('tuer') || lower.includes('tür') || lower.includes('gate') || lower.includes('portal')) {
+        setActiveTab('door');
+        processDoorGLBFile(file);
+      } else if (lower.includes('wall') || lower.includes('wand') || lower.includes('mauer')) {
+        setActiveTab('wall');
+        processWallGLBFile(file);
+      } else if (activeTab === 'floor') {
+        processFloorGLBFile(file);
+      } else if (activeTab === 'wall') {
+        processWallGLBFile(file);
+      } else if (activeTab === 'door') {
+        processDoorGLBFile(file);
+      } else {
+        setActiveTab('character');
+        processGLBFile(file);
+      }
     } else {
       alert("Bitte ziehe eine 3D-Modelldatei im .glb- oder .gltf-Format auf die Bühne.");
     }
   };
 
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCharFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       processGLBFile(file);
+    }
+  };
+
+  const handleFloorFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processFloorGLBFile(file);
+    }
+  };
+
+  const handleWallFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processWallGLBFile(file);
+    }
+  };
+
+  const handleDoorFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processDoorGLBFile(file);
     }
   };
 
@@ -1386,67 +2515,175 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {/* Hidden File Inputs for 4 Assets */}
+      <input
+        ref={charFileInputRef}
+        type="file"
+        accept=".glb,.gltf"
+        onChange={handleCharFileInputChange}
+        className="hidden"
+      />
+      <input
+        ref={floorFileInputRef}
+        type="file"
+        accept=".glb,.gltf"
+        onChange={handleFloorFileInputChange}
+        className="hidden"
+      />
+      <input
+        ref={wallFileInputRef}
+        type="file"
+        accept=".glb,.gltf"
+        onChange={handleWallFileInputChange}
+        className="hidden"
+      />
+      <input
+        ref={doorFileInputRef}
+        type="file"
+        accept=".glb,.gltf"
+        onChange={handleDoorFileInputChange}
+        className="hidden"
+      />
+
       {/* 3D WebGL Canvas */}
       <div ref={mountRef} className="absolute inset-0 w-full h-full" />
 
-      {/* DRAG & DROP OVERLAY */}
+      {/* DRAG & DROP OVERLAY WITH 4 TARGETS */}
       {isDraggingFile && (
-        <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center pointer-events-none border-4 border-dashed border-cyan-400">
-          <Upload size={64} className="text-cyan-400 mb-4 animate-bounce" />
-          <h2 className="text-2xl font-bold text-white tracking-wide">GLB-Charakter hier ablegen</h2>
-          <p className="text-gray-300 mt-2">Lade deine 3D-Datei (.glb) direkt auf die Dungeon-Bühne</p>
+        <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center p-6 border-4 border-dashed border-cyan-400">
+          <Upload size={54} className="text-cyan-400 mb-4 animate-bounce" />
+          <h2 className="text-2xl font-bold text-white tracking-wide mb-2">GLB-Datei hier ablegen</h2>
+          <p className="text-gray-300 text-sm mb-6 text-center max-w-lg">
+            Dateien mit &apos;floor&apos;/&apos;boden&apos;, &apos;wall&apos;/&apos;wand&apos; oder &apos;door&apos;/&apos;tür&apos; im Namen werden automatisch erkannt, oder entsprechend des aktiven Tabs geladen.
+          </p>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full max-w-3xl">
+            <div className={`p-4 rounded-xl border flex flex-col items-center text-center transition-all ${
+              activeTab === 'character' ? 'bg-cyan-950/60 border-cyan-400 text-cyan-200' : 'bg-gray-900/60 border-gray-700 text-gray-300'
+            }`}>
+              <User size={28} className="text-cyan-400 mb-2" />
+              <span className="font-bold text-sm">Charakter (.glb)</span>
+              <span className="text-[11px] text-gray-400 mt-1">1:1 Originalmaßstab mit Animationen</span>
+            </div>
+
+            <div className={`p-4 rounded-xl border flex flex-col items-center text-center transition-all ${
+              activeTab === 'floor' ? 'bg-emerald-950/60 border-emerald-400 text-emerald-200' : 'bg-gray-900/60 border-gray-700 text-gray-300'
+            }`}>
+              <Square size={28} className="text-emerald-400 mb-2" />
+              <span className="font-bold text-sm">Bodenplatte (8x8m)</span>
+              <span className="text-[11px] text-gray-400 mt-1">Ersetzt prozeduralen Boden (0.5m Dicke)</span>
+            </div>
+
+            <div className={`p-4 rounded-xl border flex flex-col items-center text-center transition-all ${
+              activeTab === 'wall' ? 'bg-amber-950/60 border-amber-400 text-amber-200' : 'bg-gray-900/60 border-gray-700 text-gray-300'
+            }`}>
+              <Box size={28} className="text-amber-400 mb-2" />
+              <span className="font-bold text-sm">Wand (8m)</span>
+              <span className="text-[11px] text-gray-400 mt-1">Left_Wall &amp; Upper_Wall (4m Höhe)</span>
+            </div>
+
+            <div className={`p-4 rounded-xl border flex flex-col items-center text-center transition-all ${
+              activeTab === 'door' ? 'bg-purple-950/60 border-purple-400 text-purple-200' : 'bg-gray-900/60 border-gray-700 text-gray-300'
+            }`}>
+              <DoorClosed size={28} className="text-purple-400 mb-2" />
+              <span className="font-bold text-sm">Tür (.glb)</span>
+              <span className="text-[11px] text-gray-400 mt-1">Mitte linke Wand / 90° obere Wand</span>
+            </div>
+          </div>
         </div>
       )}
 
       {/* LOADING OVERLAY */}
       {isLoadingModel && (
-        <div className="absolute inset-0 z-50 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center pointer-events-none">
+        <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center pointer-events-none">
           <div className="w-12 h-12 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin mb-4" />
-          <h3 className="text-lg font-bold text-white">3D-Modell wird geladen & aufbereitet...</h3>
+          <h3 className="text-lg font-bold text-white">{loadingMessage}</h3>
         </div>
       )}
 
       {/* TOP BAR */}
-      <div className="absolute top-0 left-0 right-0 p-4 md:p-6 flex items-center justify-between pointer-events-none z-20">
+      <div className="absolute top-0 left-0 right-0 p-3 md:p-5 flex items-center justify-between pointer-events-none z-20">
         <button
           onClick={onExit}
-          className="pointer-events-auto flex items-center gap-2 px-4 py-2.5 bg-gray-900/90 hover:bg-gray-800 text-gray-200 hover:text-white border border-gray-700/80 rounded-xl shadow-xl transition-all duration-200 font-semibold text-sm group active:scale-95"
+          className="pointer-events-auto flex items-center gap-2 px-3.5 py-2 bg-gray-900/95 hover:bg-gray-800 text-gray-200 hover:text-white border border-gray-700/80 rounded-xl shadow-xl transition-all font-semibold text-xs group active:scale-95"
           title="Zurück zum Editor Hauptmenü"
         >
-          <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform text-emerald-400" />
+          <ArrowLeft size={16} className="group-hover:-translate-x-1 transition-transform text-emerald-400" />
           <span>Zurück zum Editor</span>
         </button>
 
-        {/* Central Character & Stage Badge */}
-        <div className="hidden sm:flex items-center gap-3 px-4 py-1.5 bg-gray-900/90 border border-gray-800 rounded-full text-xs text-gray-300 font-mono shadow-lg">
-          <Compass size={14} className="text-cyan-400" />
-          <span className="font-bold text-white">3D Dungeon</span>
-          <span className="text-gray-500">|</span>
-          <span className="text-emerald-400 font-semibold">
-            {customModelLoaded ? `Charakter: ${customModelName}` : 'Standard Anime-Dummy'}
-          </span>
-        </div>
-
-        {/* Right Action: Quick GLB Upload / Status Pill */}
-        <div className="pointer-events-auto flex items-center gap-3">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".glb,.gltf"
-            onChange={handleFileInputChange}
-            className="hidden"
-          />
-
+        {/* Central 3-Asset Badges (Click to switch tab in dock) */}
+        <div className="pointer-events-auto hidden sm:flex items-center gap-2 px-3 py-1.5 bg-gray-900/90 border border-gray-800 rounded-2xl text-xs shadow-xl backdrop-blur-md">
           <button
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-2 px-3.5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs rounded-xl shadow-lg border border-cyan-400/40 transition-all active:scale-95"
-            title="Eigene .glb Datei vom Computer laden"
+            onClick={() => { setActiveTab('character'); setIsDockCollapsed(false); playTactileSfx('click'); }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+              activeTab === 'character'
+                ? 'bg-cyan-900/70 text-cyan-200 border border-cyan-500/80 shadow'
+                : 'text-gray-300 hover:text-white hover:bg-gray-800'
+            }`}
           >
-            <Upload size={14} />
-            <span>{customModelLoaded ? 'Anderen GLB laden' : 'Eigenen GLB laden'}</span>
+            <User size={13} className="text-cyan-400" />
+            <span>Charakter:</span>
+            <span className="font-mono text-[11px] text-cyan-300 font-bold max-w-[100px] truncate">
+              {customModelLoaded ? customModelName : 'Dummy'}
+            </span>
           </button>
 
-          <div className="hidden md:flex items-center gap-3 px-3.5 py-1.5 bg-gray-900/90 border border-gray-800 rounded-xl text-xs shadow-xl">
+          <span className="text-gray-700">|</span>
+
+          <button
+            onClick={() => { setActiveTab('floor'); setIsDockCollapsed(false); playTactileSfx('click'); }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+              activeTab === 'floor'
+                ? 'bg-emerald-900/70 text-emerald-200 border border-emerald-500/80 shadow'
+                : 'text-gray-300 hover:text-white hover:bg-gray-800'
+            }`}
+          >
+            <Square size={13} className="text-emerald-400" />
+            <span>Boden (8x8m):</span>
+            <span className="font-mono text-[11px] text-emerald-300 font-bold max-w-[100px] truncate">
+              {customFloorLoaded ? customFloorName : 'Prozedural'}
+            </span>
+          </button>
+
+          <span className="text-gray-700">|</span>
+
+          <button
+            onClick={() => { setActiveTab('wall'); setIsDockCollapsed(false); playTactileSfx('click'); }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+              activeTab === 'wall'
+                ? 'bg-amber-900/70 text-amber-200 border border-amber-500/80 shadow'
+                : 'text-gray-300 hover:text-white hover:bg-gray-800'
+            }`}
+          >
+            <Box size={13} className="text-amber-400" />
+            <span>Wand (8m):</span>
+            <span className="font-mono text-[11px] text-amber-300 font-bold max-w-[90px] truncate">
+              {customWallLoaded ? customWallName : 'Prozedural'}
+            </span>
+          </button>
+
+          <span className="text-gray-700">|</span>
+
+          <button
+            onClick={() => { setActiveTab('door'); setIsDockCollapsed(false); playTactileSfx('click'); }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+              activeTab === 'door'
+                ? 'bg-purple-900/70 text-purple-200 border border-purple-500/80 shadow'
+                : 'text-gray-300 hover:text-white hover:bg-gray-800'
+            }`}
+          >
+            <DoorClosed size={13} className="text-purple-400" />
+            <span>Tür:</span>
+            <span className="font-mono text-[11px] text-purple-300 font-bold max-w-[90px] truncate">
+              {customDoorLoaded ? customDoorName : 'Keine'}
+            </span>
+          </button>
+        </div>
+
+        {/* Right Status Pill */}
+        <div className="pointer-events-auto flex items-center gap-2">
+          <div className="flex items-center gap-2.5 px-3 py-1.5 bg-gray-900/90 border border-gray-800 rounded-xl text-xs shadow-xl">
             <div className="flex items-center gap-1.5">
               <span className="text-gray-400">Kachel:</span>
               <span className="font-mono font-bold text-cyan-300 bg-gray-800 px-1.5 py-0.5 rounded">
@@ -1480,15 +2717,6 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         </div>
       )}
 
-      {/* DRAG AND DROP HINT BADGE (Top Center) */}
-      {!customModelLoaded && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 pointer-events-none z-10 text-center hidden md:block">
-          <div className="bg-cyan-950/60 border border-cyan-500/30 px-3 py-1 rounded-full text-[11px] text-cyan-200">
-            💡 Tipp: Du kannst deine <strong>.glb</strong>-Datei auch per Drag & Drop direkt auf den Bildschirm ziehen!
-          </div>
-        </div>
-      )}
-
       {/* UNIFIED COLLAPSIBLE BOTTOM DOCK */}
       <div
         className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 transition-all duration-300 ease-out flex flex-col items-center"
@@ -1496,11 +2724,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       >
         <button
           onClick={() => setIsDockCollapsed(!isDockCollapsed)}
-          className="mb-1 px-3.5 py-1 bg-gray-900 text-gray-300 hover:text-white rounded-t-lg border-t border-x border-gray-700/80 text-xs font-semibold flex items-center gap-1 shadow-lg transition-colors"
+          className="mb-1 px-4 py-1.5 bg-gray-900 text-gray-300 hover:text-white rounded-t-xl border-t border-x border-gray-700/80 text-xs font-semibold flex items-center gap-1.5 shadow-lg transition-colors"
         >
           {isDockCollapsed ? (
             <>
-              <ChevronUp size={14} /> 3D-Charakter & Steuerung anzeigen
+              <ChevronUp size={14} className="text-cyan-400" /> Assets & Dungeon-Steuerung öffnen
             </>
           ) : (
             <>
@@ -1510,234 +2738,1082 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         </button>
 
         {!isDockCollapsed && (
-          <div className="w-full bg-gray-900/95 border border-gray-800 rounded-2xl p-4 shadow-2xl space-y-3.5">
-            {/* Top row: Model status & GLB controls */}
-            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-gray-800">
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
-                  <User size={15} className="text-cyan-400" /> Aktives Modell:
-                </span>
-
-                {customModelLoaded ? (
-                  <div className="flex items-center gap-2 bg-cyan-950/50 border border-cyan-600/50 px-3 py-1 rounded-xl text-xs text-cyan-200">
-                    <Check size={14} className="text-cyan-400" />
-                    <span className="font-semibold truncate max-w-[200px]" title={customModelName}>
-                      {customModelName}
-                    </span>
-                    {customModelSize > 0 && (
-                      <span className="text-[10px] text-gray-400">
-                        ({(customModelSize / (1024 * 1024)).toFixed(2)} MB)
-                      </span>
-                    )}
-                  </div>
-                ) : (
-                  <span className="text-xs text-gray-300 bg-gray-800 px-2.5 py-1 rounded-lg border border-gray-700">
-                    Standard Anime-Kriegerin (Dummy)
-                  </span>
-                )}
-              </div>
-
+          <div className="w-full bg-gray-900/95 border border-gray-800 rounded-2xl p-4 shadow-2xl space-y-3.5 backdrop-blur-md">
+            {/* Top row: Tab Navigation for Character, Floor, Wall, Door */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-gray-800">
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-cyan-300 hover:text-white border border-gray-700 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
+                  onClick={() => { setActiveTab('character'); playTactileSfx('click'); }}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                    activeTab === 'character'
+                      ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50 border border-cyan-400'
+                      : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700/80'
+                  }`}
                 >
-                  <Upload size={13} />
-                  <span>{customModelLoaded ? 'Neue GLB Datei wählen' : 'Eigene GLB hochladen'}</span>
+                  <User size={14} className={activeTab === 'character' ? 'text-white' : 'text-cyan-400'} />
+                  <span>1. Charakter</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                    customModelLoaded ? 'bg-cyan-950 text-cyan-300 border border-cyan-700' : 'bg-gray-900 text-gray-500'
+                  }`}>
+                    {customModelLoaded ? 'GLB' : 'Dummy'}
+                  </span>
                 </button>
 
-                {customModelLoaded && (
+                <button
+                  onClick={() => { setActiveTab('floor'); playTactileSfx('click'); }}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                    activeTab === 'floor'
+                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-950/50 border border-emerald-400'
+                      : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700/80'
+                  }`}
+                >
+                  <Square size={14} className={activeTab === 'floor' ? 'text-white' : 'text-emerald-400'} />
+                  <span>2. Boden</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                    customFloorLoaded ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-gray-900 text-gray-500'
+                  }`}>
+                    {customFloorLoaded ? '8x8m' : 'Prozedural'}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => { setActiveTab('wall'); playTactileSfx('click'); }}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                    activeTab === 'wall'
+                      ? 'bg-amber-600 text-white shadow-lg shadow-amber-950/50 border border-amber-400'
+                      : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700/80'
+                  }`}
+                >
+                  <Box size={14} className={activeTab === 'wall' ? 'text-white' : 'text-amber-400'} />
+                  <span>3. Wand</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                    customWallLoaded ? 'bg-amber-950 text-amber-300 border border-amber-700' : 'bg-gray-900 text-gray-500'
+                  }`}>
+                    {customWallLoaded ? '8m' : 'Prozedural'}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => { setActiveTab('door'); playTactileSfx('click'); }}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                    activeTab === 'door'
+                      ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/50 border border-purple-400'
+                      : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700/80'
+                  }`}
+                >
+                  <DoorClosed size={14} className={activeTab === 'door' ? 'text-white' : 'text-purple-400'} />
+                  <span>4. Tür</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                    customDoorLoaded ? 'bg-purple-950 text-purple-300 border border-purple-700' : 'bg-gray-900 text-gray-500'
+                  }`}>
+                    {customDoorLoaded ? 'GLB' : 'Keine'}
+                  </span>
+                </button>
+              </div>
+
+              {/* Quick Action in Tab Header */}
+              <div className="flex items-center gap-2">
+                {activeTab === 'character' && (
                   <button
-                    onClick={handleResetToDummy}
-                    className="px-3 py-1.5 bg-red-950/40 hover:bg-red-900/60 text-red-300 hover:text-white border border-red-800/50 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
-                    title="GLB entfernen und Dummy wiederherstellen"
+                    onClick={() => charFileInputRef.current?.click()}
+                    className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white border border-cyan-400/40 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors shadow"
                   >
-                    <Trash2 size={13} />
-                    <span>Dummy wiederherstellen</span>
+                    <Upload size={13} />
+                    <span>{customModelLoaded ? 'Anderen Charakter wählen' : 'Charakter GLB laden'}</span>
+                  </button>
+                )}
+
+                {activeTab === 'floor' && (
+                  <button
+                    onClick={() => floorFileInputRef.current?.click()}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/40 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors shadow"
+                  >
+                    <Upload size={13} />
+                    <span>{customFloorLoaded ? 'Andere Bodenplatte wählen' : 'Bodenplatte GLB (8x8m) laden'}</span>
+                  </button>
+                )}
+
+                {activeTab === 'wall' && (
+                  <button
+                    onClick={() => wallFileInputRef.current?.click()}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white border border-amber-400/40 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors shadow"
+                  >
+                    <Upload size={13} />
+                    <span>{customWallLoaded ? 'Andere Wand wählen' : 'Wand GLB (8m) laden'}</span>
+                  </button>
+                )}
+
+                {activeTab === 'door' && (
+                  <button
+                    onClick={() => doorFileInputRef.current?.click()}
+                    className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white border border-purple-400/40 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors shadow"
+                  >
+                    <Upload size={13} />
+                    <span>{customDoorLoaded ? 'Andere Tür wählen' : 'Tür GLB laden'}</span>
                   </button>
                 )}
               </div>
             </div>
 
-            {/* Project Characters Bar */}
-            {characters && characters.length > 0 && (
-              <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
-                <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider flex-shrink-0 flex items-center gap-1">
-                  <Layers size={13} /> Charaktere:
-                </span>
-                <button
-                  onClick={handleResetToDummy}
-                  className={`px-2.5 py-1 rounded-lg border text-xs font-semibold transition-all flex-shrink-0 ${
-                    !customModelLoaded
-                      ? 'bg-purple-900/60 text-purple-200 border-purple-500 shadow'
-                      : 'bg-gray-800/80 text-gray-400 border-gray-700 hover:text-gray-200'
-                  }`}
-                >
-                  Standard-Dummy
-                </button>
-                {characters.map(char => (
-                  <button
-                    key={char.id}
-                    onClick={() => {
-                      if (char.model3dSrc) {
-                        loadCharacterFromProject(char);
-                      } else {
-                        fileInputRef.current?.click();
-                      }
-                    }}
-                    className={`px-2.5 py-1 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-all flex-shrink-0 ${
-                      customModelName.startsWith(char.name)
-                        ? 'bg-cyan-900/60 text-cyan-200 border-cyan-500 shadow'
-                        : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:bg-gray-700'
-                    }`}
-                    title={char.model3dSrc ? `3D-Modell von ${char.name} laden` : `Eigenen GLB für ${char.name} hochladen`}
-                  >
-                    <span style={{ color: char.rpgColor || '#38bdf8' }}>●</span>
-                    <span>{char.name}</span>
-                    {char.model3dSrc ? (
-                      <span className="text-[9px] bg-cyan-950 text-cyan-400 border border-cyan-700/60 px-1 rounded font-mono font-bold">
-                        3D
-                      </span>
+            {/* TAB 1: CHARACTER CONTROLS */}
+            {activeTab === 'character' && (
+              <div className="space-y-3">
+                {/* Character Status Row */}
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-gray-950/60 p-2.5 rounded-xl border border-gray-800">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <User size={14} className="text-cyan-400" /> Charakter:
+                    </span>
+                    {customModelLoaded ? (
+                      <div className="flex items-center gap-2 bg-cyan-950/50 border border-cyan-600/50 px-2.5 py-1 rounded-lg text-xs text-cyan-200">
+                        <Check size={14} className="text-cyan-400" />
+                        <span className="font-semibold truncate max-w-[220px]" title={customModelName}>
+                          {customModelName}
+                        </span>
+                        {customModelSize > 0 && (
+                          <span className="text-[10px] text-gray-400">
+                            ({(customModelSize / (1024 * 1024)).toFixed(2)} MB)
+                          </span>
+                        )}
+                      </div>
                     ) : (
-                      <span className="text-[9px] text-gray-500">
-                        (+GLB)
+                      <span className="text-xs text-gray-300 bg-gray-800 px-2 py-0.5 rounded-lg border border-gray-700">
+                        Standard Anime-Kriegerin (Dummy)
                       </span>
                     )}
-                  </button>
-                ))}
-              </div>
-            )}
 
-            {/* Custom Model Adjustments (Scale, Offset Y, Rotation, Animations) */}
-            {customModelLoaded && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-gray-950/70 p-3 rounded-xl border border-gray-800/80 text-xs">
-                {/* Scale & Offset */}
-                <div className="space-y-2">
-                  <div className="flex justify-between items-center text-gray-400">
-                    <span className="flex items-center gap-1 font-semibold">
-                      <Sliders size={13} className="text-amber-400" /> Skalierung: {modelScale.toFixed(2)}x
+                    <span className="hidden lg:inline text-[11px] text-emerald-400 font-mono bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded-lg">
+                      1:1 Originalmaßstab aktiv (Körper: 1.36m, Kopf: 0.538m)
                     </span>
-                    <button 
-                      onClick={() => setModelScale(1.0)} 
-                      className="text-[10px] text-gray-500 hover:text-gray-300 underline"
-                    >
-                      Reset (1.0x)
-                    </button>
                   </div>
-                  <input
-                    type="range"
-                    min="0.3"
-                    max="2.5"
-                    step="0.05"
-                    value={modelScale}
-                    onChange={(e) => setModelScale(parseFloat(e.target.value))}
-                    className="w-full accent-cyan-500 cursor-pointer"
-                  />
 
-                  <div className="flex justify-between items-center text-gray-400 pt-1">
-                    <span className="font-semibold">Höhe (Y): {modelOffsetY.toFixed(2)}m</span>
-                    <button 
-                      onClick={() => setModelOffsetY(0.0)} 
-                      className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                  {customModelLoaded && (
+                    <button
+                      onClick={handleResetToDummy}
+                      className="px-2.5 py-1 bg-red-950/40 hover:bg-red-900/60 text-red-300 hover:text-white border border-red-800/50 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
+                      title="GLB entfernen und Dummy wiederherstellen"
                     >
-                      Reset (0m)
+                      <Trash2 size={13} />
+                      <span>Dummy wiederherstellen</span>
                     </button>
-                  </div>
-                  <input
-                    type="range"
-                    min="-0.6"
-                    max="0.6"
-                    step="0.02"
-                    value={modelOffsetY}
-                    onChange={(e) => setModelOffsetY(parseFloat(e.target.value))}
-                    className="w-full accent-cyan-500 cursor-pointer"
-                  />
+                  )}
                 </div>
 
-                {/* 4-Way Model Direction Offset (Rotation Y) */}
-                <div className="space-y-2">
-                  <div className="text-gray-400 font-semibold flex items-center gap-1">
-                    <RotateCcw size={13} className="text-blue-400" /> Modell-Ausrichtung (Blender-Offset):
-                  </div>
-                  <div className="grid grid-cols-4 gap-1">
-                    {[0, 90, 180, 270].map(deg => (
+                {/* Project Characters Bar */}
+                {characters && characters.length > 0 && (
+                  <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
+                    <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider flex-shrink-0 flex items-center gap-1">
+                      <Layers size={13} /> Aus Projekt:
+                    </span>
+                    <button
+                      onClick={handleResetToDummy}
+                      className={`px-2.5 py-1 rounded-lg border text-xs font-semibold transition-all flex-shrink-0 ${
+                        !customModelLoaded
+                          ? 'bg-purple-900/60 text-purple-200 border-purple-500 shadow'
+                          : 'bg-gray-800/80 text-gray-400 border-gray-700 hover:text-gray-200'
+                      }`}
+                    >
+                      Standard-Dummy
+                    </button>
+                    {characters.map(char => (
                       <button
-                        key={deg}
-                        onClick={() => setModelRotationY(deg)}
-                        className={`py-1.5 rounded-lg border text-xs font-mono font-bold transition-all ${
-                          modelRotationY === deg
-                            ? 'bg-cyan-600 text-white border-cyan-400'
-                            : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                        key={char.id}
+                        onClick={() => {
+                          if (char.model3dSrc) {
+                            loadCharacterFromProject(char);
+                          } else {
+                            charFileInputRef.current?.click();
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-all flex-shrink-0 ${
+                          customModelName.startsWith(char.name)
+                            ? 'bg-cyan-900/60 text-cyan-200 border-cyan-500 shadow'
+                            : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:bg-gray-700'
                         }`}
+                        title={char.model3dSrc ? `3D-Modell von ${char.name} laden` : `Eigenen GLB für ${char.name} hochladen`}
                       >
-                        {deg}°
+                        <span style={{ color: char.rpgColor || '#38bdf8' }}>●</span>
+                        <span>{char.name}</span>
+                        {char.model3dSrc ? (
+                          <span className="text-[9px] bg-cyan-950 text-cyan-400 border border-cyan-700/60 px-1 rounded font-mono font-bold">
+                            3D
+                          </span>
+                        ) : (
+                          <span className="text-[9px] text-gray-500">
+                            (+GLB)
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>
-                  <p className="text-[10px] text-gray-500 leading-tight">
-                    Falls das Modell in Blender rückwärts exportiert wurde, wähle hier 180°.
-                  </p>
-                </div>
+                )}
 
-                {/* Animation Clip Selectors */}
-                <div className="space-y-2">
-                  <div className="text-gray-400 font-semibold flex items-center gap-1">
-                    <Film size={13} className="text-purple-400" /> Animationen ({availableClips.length} gefunden):
+                {/* Character Adjustments (Scale, Offset Y, Rotation, Animations) */}
+                {customModelLoaded && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-gray-950/70 p-3 rounded-xl border border-gray-800/80 text-xs">
+                    {/* Scale & Offset */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center text-gray-400">
+                        <span className="flex items-center gap-1 font-semibold">
+                          <Sliders size={13} className="text-amber-400" /> Skalierung: {modelScale.toFixed(2)}x
+                        </span>
+                        <button 
+                          onClick={() => setModelScale(1.0)} 
+                          className="text-[10px] text-cyan-400 hover:underline"
+                        >
+                          1:1 Original
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.3"
+                        max="2.5"
+                        step="0.05"
+                        value={modelScale}
+                        onChange={(e) => setModelScale(parseFloat(e.target.value))}
+                        className="w-full accent-cyan-500 cursor-pointer"
+                      />
+
+                      <div className="flex justify-between items-center text-gray-400 pt-1">
+                        <span className="font-semibold">Höhe (Y): {modelOffsetY.toFixed(2)}m</span>
+                        <button 
+                          onClick={() => setModelOffsetY(0.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          Reset (0m)
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="-0.6"
+                        max="0.6"
+                        step="0.02"
+                        value={modelOffsetY}
+                        onChange={(e) => setModelOffsetY(parseFloat(e.target.value))}
+                        className="w-full accent-cyan-500 cursor-pointer"
+                      />
+                    </div>
+
+                    {/* 4-Way Model Direction Offset (Rotation Y) */}
+                    <div className="space-y-2">
+                      <div className="text-gray-400 font-semibold flex items-center gap-1">
+                        <RotateCcw size={13} className="text-blue-400" /> Ausrichtung (Blender-Offset):
+                      </div>
+                      <div className="grid grid-cols-4 gap-1">
+                        {[0, 90, 180, 270].map(deg => (
+                          <button
+                            key={deg}
+                            onClick={() => setModelRotationY(deg)}
+                            className={`py-1.5 rounded-lg border text-xs font-mono font-bold transition-all ${
+                              modelRotationY === deg
+                                ? 'bg-cyan-600 text-white border-cyan-400'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            {deg}°
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-gray-500 leading-tight">
+                        Wähle 180°, falls das Modell in Blender mit dem Rücken nach vorne exportiert wurde.
+                      </p>
+                    </div>
+
+                    {/* Animation Clip Selectors */}
+                    <div className="space-y-2">
+                      <div className="text-gray-400 font-semibold flex items-center gap-1">
+                        <Film size={13} className="text-purple-400" /> Animationen ({availableClips.length} gefunden):
+                      </div>
+
+                      {availableClips.length > 0 ? (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-gray-400 w-10">Idle:</span>
+                            <select
+                              value={selectedIdleClip}
+                              onChange={(e) => {
+                                const newIdle = e.target.value;
+                                setSelectedIdleClip(newIdle);
+                                selectedIdleClipRef.current = newIdle;
+                                if (animState === 'IDLE') {
+                                  playAnimationClip(newIdle);
+                                }
+                              }}
+                              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-white outline-none focus:border-cyan-500 font-mono"
+                            >
+                              {availableClips.map(clip => (
+                                <option key={clip} value={clip}>{clip}</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-gray-400 w-10">Lauf:</span>
+                            <select
+                              value={selectedRunClip}
+                              onChange={(e) => {
+                                const newRun = e.target.value;
+                                setSelectedRunClip(newRun);
+                                selectedRunClipRef.current = newRun;
+                                if (animState === 'RUN') {
+                                  playAnimationClip(newRun);
+                                }
+                              }}
+                              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-white outline-none focus:border-cyan-500 font-mono"
+                            >
+                              {availableClips.map(clip => (
+                                <option key={clip} value={clip}>{clip}</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-2 bg-gray-900 border border-gray-800 rounded-lg text-[11px] text-gray-400">
+                          Keine Skelettanimationen in der Datei. Das Modell wird beim Laufen prozedural bewegt.
+                        </div>
+                      )}
+                    </div>
                   </div>
-
-                  {availableClips.length > 0 ? (
-                    <div className="space-y-1.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-gray-500 w-10">Idle:</span>
-                        <select
-                          value={selectedIdleClip}
-                          onChange={(e) => {
-                            const newIdle = e.target.value;
-                            setSelectedIdleClip(newIdle);
-                            selectedIdleClipRef.current = newIdle;
-                            if (animState === 'IDLE') {
-                              playAnimationClip(newIdle);
-                            }
-                          }}
-                          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-white outline-none focus:border-cyan-500"
-                        >
-                          {availableClips.map(clip => (
-                            <option key={clip} value={clip}>{clip}</option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-gray-500 w-10">Lauf:</span>
-                        <select
-                          value={selectedRunClip}
-                          onChange={(e) => {
-                            const newRun = e.target.value;
-                            setSelectedRunClip(newRun);
-                            selectedRunClipRef.current = newRun;
-                            if (animState === 'RUN') {
-                              playAnimationClip(newRun);
-                            }
-                          }}
-                          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-white outline-none focus:border-cyan-500"
-                        >
-                          {availableClips.map(clip => (
-                            <option key={clip} value={clip}>{clip}</option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="p-2 bg-gray-900 border border-gray-800 rounded-lg text-[11px] text-gray-400">
-                      Keine Skelettanimationen in der Datei. Das Modell wird beim Laufen prozedural bewegt.
-                    </div>
-                  )}
-                </div>
+                )}
               </div>
             )}
 
-            {/* Bottom Row Actions */}
-            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+            {/* TAB 2: FLOOR CONTROLS (8x8m CHUNK) */}
+            {activeTab === 'floor' && (
+              <div className="space-y-3">
+                {/* Floor Status Row */}
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-gray-950/60 p-2.5 rounded-xl border border-gray-800">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <Square size={14} className="text-emerald-400" /> Boden-Grafik:
+                    </span>
+                    {customFloorLoaded ? (
+                      <div className="flex items-center gap-2 bg-emerald-950/50 border border-emerald-600/50 px-2.5 py-1 rounded-lg text-xs text-emerald-200">
+                        <Check size={14} className="text-emerald-400" />
+                        <span className="font-semibold truncate max-w-[220px]" title={customFloorName}>
+                          {customFloorName}
+                        </span>
+                        <span className="text-[10px] bg-emerald-900/60 text-emerald-300 px-1.5 py-0.5 rounded font-mono font-bold">
+                          8x8m Chunk aktiv
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-300 bg-gray-800 px-2 py-0.5 rounded-lg border border-gray-700">
+                        Prozeduraler Diorama-Boden (7.2m)
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => floorFileInputRef.current?.click()}
+                      className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors shadow"
+                    >
+                      <Upload size={13} />
+                      <span>{customFloorLoaded ? 'Anderen Boden laden' : 'Bodenplatte (.glb) laden'}</span>
+                    </button>
+
+                    {customFloorLoaded && (
+                      <button
+                        onClick={handleResetFloor}
+                        className="px-2.5 py-1 bg-red-950/40 hover:bg-red-900/60 text-red-300 hover:text-white border border-red-800/50 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
+                        title="Eigene Bodenplatte entfernen und Standardboden wiederherstellen"
+                      >
+                        <Trash2 size={13} />
+                        <span>Prozeduralen Boden wiederherstellen</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Blender Blueprint Specification Box */}
+                <div className="bg-emerald-950/30 border border-emerald-800/40 rounded-xl p-3 text-xs text-emerald-200 flex flex-col md:flex-row md:items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="font-bold flex items-center gap-1.5 text-emerald-300">
+                      <span>📐 Blender Floor_chunk Maße:</span>
+                      <span className="font-mono bg-emerald-900/60 px-2 py-0.5 rounded text-white font-semibold">
+                        X = 8m | Y = 8m | Z = 0.5m
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-300 leading-relaxed">
+                      Der Pivot-Punkt liegt genau in der Mitte. Die Begehfläche schmiegt sich bei <strong>Y = +0.25m</strong> bündig an. Das 3x3 Kachel-Raster passt sich automatisch nahtlos an (je 2.67m pro Schritt).
+                    </p>
+                  </div>
+                </div>
+
+                {/* Fine-Tuning Controls for Floor Chunk */}
+                {customFloorLoaded && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-gray-950/70 p-3 rounded-xl border border-gray-800/80 text-xs">
+                    {/* Height Offset Y & Scale */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center text-gray-400">
+                        <span className="font-semibold text-emerald-300">Höhe (Y): {floorOffsetY.toFixed(2)}m</span>
+                        <button 
+                          onClick={() => setFloorOffsetY(0.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          Reset (0m)
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="-0.5"
+                        max="0.5"
+                        step="0.02"
+                        value={floorOffsetY}
+                        onChange={(e) => setFloorOffsetY(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 cursor-pointer"
+                      />
+
+                      <div className="flex justify-between items-center text-gray-400 pt-1">
+                        <span className="font-semibold">Skalierung: {floorScale.toFixed(2)}x</span>
+                        <button 
+                          onClick={() => setFloorScale(1.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          1.0x (8m)
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="2.0"
+                        step="0.05"
+                        value={floorScale}
+                        onChange={(e) => setFloorScale(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Position X & Z Offsets */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center text-gray-400">
+                        <span className="font-semibold">Verschiebung X: {floorOffsetX.toFixed(2)}m</span>
+                        <button 
+                          onClick={() => setFloorOffsetX(0.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          0m
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="-1.5"
+                        max="1.5"
+                        step="0.05"
+                        value={floorOffsetX}
+                        onChange={(e) => setFloorOffsetX(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 cursor-pointer"
+                      />
+
+                      <div className="flex justify-between items-center text-gray-400 pt-1">
+                        <span className="font-semibold">Verschiebung Z: {floorOffsetZ.toFixed(2)}m</span>
+                        <button 
+                          onClick={() => setFloorOffsetZ(0.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          0m
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="-1.5"
+                        max="1.5"
+                        step="0.05"
+                        value={floorOffsetZ}
+                        onChange={(e) => setFloorOffsetZ(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Floor Rotation Y */}
+                    <div className="space-y-2">
+                      <div className="text-gray-400 font-semibold flex items-center gap-1">
+                        <RotateCcw size={13} className="text-emerald-400" /> Bodenplatten-Drehung (Y):
+                      </div>
+                      <div className="grid grid-cols-4 gap-1">
+                        {[0, 90, 180, 270].map(deg => (
+                          <button
+                            key={deg}
+                            onClick={() => setFloorRotationY(deg)}
+                            className={`py-1.5 rounded-lg border text-xs font-mono font-bold transition-all ${
+                              floorRotationY === deg
+                                ? 'bg-emerald-600 text-white border-emerald-400'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            {deg}°
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-gray-500 leading-tight">
+                        Dreht die Textur bzw. Ausrichtung der 8x8m Bodenplatte um das Zentrum.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 3: WALL CONTROLS (8m WALL) */}
+            {activeTab === 'wall' && (
+              <div className="space-y-3">
+                {/* Wall Status Row */}
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-gray-950/60 p-2.5 rounded-xl border border-gray-800">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <Box size={14} className="text-amber-400" /> Wand-Grafik:
+                    </span>
+                    {customWallLoaded ? (
+                      <div className="flex items-center gap-2 bg-amber-950/50 border border-amber-600/50 px-2.5 py-1 rounded-lg text-xs text-amber-200">
+                        <Check size={14} className="text-amber-400" />
+                        <span className="font-semibold truncate max-w-[220px]" title={customWallName}>
+                          {customWallName}
+                        </span>
+                        <span className="text-[10px] bg-amber-900/60 text-amber-300 px-1.5 py-0.5 rounded font-mono font-bold">
+                          8m Wand aktiv
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-300 bg-gray-800 px-2 py-0.5 rounded-lg border border-gray-700">
+                        Prozedurale Wände mit Torbogen & Fackeln
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => wallFileInputRef.current?.click()}
+                      className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors shadow"
+                    >
+                      <Upload size={13} />
+                      <span>{customWallLoaded ? 'Andere Wand laden' : 'Wand (.glb) laden'}</span>
+                    </button>
+
+                    {customWallLoaded && (
+                      <button
+                        onClick={handleResetWall}
+                        className="px-2.5 py-1 bg-red-950/40 hover:bg-red-900/60 text-red-300 hover:text-white border border-red-800/50 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
+                        title="Eigene Wand entfernen und prozedurale Wände wiederherstellen"
+                      >
+                        <Trash2 size={13} />
+                        <span>Prozedurale Wände wiederherstellen</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Blender Blueprint Specification Box */}
+                <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3 text-xs text-amber-200 flex flex-col md:flex-row md:items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="font-bold flex items-center gap-1.5 text-amber-300">
+                      <span>📐 Blender Wand Maße:</span>
+                      <span className="font-mono bg-amber-900/60 px-2 py-0.5 rounded text-white font-semibold">
+                        X = 8m | Y = 0.5m | Z = 4m
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-300 leading-relaxed">
+                      Wände werden <strong>ausschließlich links (Left_Wall)</strong> und <strong>oben (Upper_Wall)</strong> aufgestellt. Die vordere und rechte Seite bleiben immer frei, damit Charaktere niemals von einer Wand verdeckt werden.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Left_Wall & Upper_Wall Controls */}
+                {customWallLoaded && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* Left_Wall Card */}
+                      <div className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
+                        showLeftWall
+                          ? 'bg-amber-950/40 border-amber-500/80 text-white shadow-md'
+                          : 'bg-gray-900/60 border-gray-800 text-gray-400'
+                      }`}>
+                        <div className="flex items-center gap-2.5">
+                          <div className={`w-3 h-3 rounded-full ${showLeftWall ? 'bg-amber-400 shadow-sm shadow-amber-400' : 'bg-gray-700'}`} />
+                          <div>
+                            <div className="font-bold text-xs text-white">Left_Wall (Linke Wand)</div>
+                            <div className="text-[10px] text-gray-400">Steht links am Rand (0° Standard)</div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={toggleLeftWall}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                            showLeftWall
+                              ? 'bg-amber-600 hover:bg-amber-500 text-white shadow'
+                              : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700'
+                          }`}
+                        >
+                          {showLeftWall ? 'Aktiv (An)' : 'Aus'}
+                        </button>
+                      </div>
+
+                      {/* Upper_Wall Card */}
+                      <div className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
+                        showUpperWall
+                          ? 'bg-amber-950/40 border-amber-500/80 text-white shadow-md'
+                          : 'bg-gray-900/60 border-gray-800 text-gray-400'
+                      }`}>
+                        <div className="flex items-center gap-2.5">
+                          <div className={`w-3 h-3 rounded-full ${showUpperWall ? 'bg-amber-400 shadow-sm shadow-amber-400' : 'bg-gray-700'}`} />
+                          <div>
+                            <div className="font-bold text-xs text-white">Upper_Wall (Obere Wand)</div>
+                            <div className="text-[10px] text-gray-400">Um -90° gedreht oben am Rand</div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={toggleUpperWall}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                            showUpperWall
+                              ? 'bg-amber-600 hover:bg-amber-500 text-white shadow'
+                              : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700'
+                          }`}
+                        >
+                          {showUpperWall ? 'Aktiv (An)' : 'Aus'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-gray-950/70 p-3 rounded-xl border border-gray-800/80 text-xs">
+                      {/* Presets */}
+                      <div className="space-y-2">
+                        <div className="text-gray-400 font-semibold flex items-center gap-1">
+                          <Layers size={13} className="text-amber-400" /> Schnellauswahl:
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <button
+                            onClick={() => {
+                              setShowLeftWall(true);
+                              setShowUpperWall(true);
+                              playTactileSfx('click');
+                            }}
+                            className={`px-2 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                              showLeftWall && showUpperWall
+                                ? 'bg-amber-600 text-white border-amber-400 shadow'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            Beide Wände
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShowLeftWall(true);
+                              setShowUpperWall(false);
+                              playTactileSfx('click');
+                            }}
+                            className={`px-2 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                              showLeftWall && !showUpperWall
+                                ? 'bg-amber-600 text-white border-amber-400 shadow'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            Nur Left_Wall
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShowLeftWall(false);
+                              setShowUpperWall(true);
+                              playTactileSfx('click');
+                            }}
+                            className={`px-2 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                              !showLeftWall && showUpperWall
+                                ? 'bg-amber-600 text-white border-amber-400 shadow'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            Nur Upper_Wall
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShowLeftWall(false);
+                              setShowUpperWall(false);
+                              playTactileSfx('click');
+                            }}
+                            className={`px-2 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                              !showLeftWall && !showUpperWall
+                                ? 'bg-amber-600 text-white border-amber-400 shadow'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            Keine Wände
+                          </button>
+                        </div>
+                      </div>
+
+                    {/* Height & Scale */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center text-gray-400">
+                        <span className="font-semibold text-amber-300">Höhe (Y): {wallOffsetY.toFixed(2)}m</span>
+                        <button 
+                          onClick={() => setWallOffsetY(0.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          Reset (0m)
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="-0.5"
+                        max="0.5"
+                        step="0.02"
+                        value={wallOffsetY}
+                        onChange={(e) => setWallOffsetY(parseFloat(e.target.value))}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+
+                      <div className="flex justify-between items-center text-gray-400 pt-1">
+                        <span className="font-semibold">Skalierung: {wallScale.toFixed(2)}x</span>
+                        <button 
+                          onClick={() => setWallScale(1.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          1.0x (8m)
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="2.0"
+                        step="0.05"
+                        value={wallScale}
+                        onChange={(e) => setWallScale(parseFloat(e.target.value))}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Position X & Z Offsets */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center text-gray-400">
+                        <span className="font-semibold">Verschiebung X: {wallOffsetX.toFixed(2)}m</span>
+                        <button 
+                          onClick={() => setWallOffsetX(0.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          0m
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="-1.5"
+                        max="1.5"
+                        step="0.05"
+                        value={wallOffsetX}
+                        onChange={(e) => setWallOffsetX(parseFloat(e.target.value))}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+
+                      <div className="flex justify-between items-center text-gray-400 pt-1">
+                        <span className="font-semibold">Verschiebung Z: {wallOffsetZ.toFixed(2)}m</span>
+                        <button 
+                          onClick={() => setWallOffsetZ(0.0)} 
+                          className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                        >
+                          0m
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min="-1.5"
+                        max="1.5"
+                        step="0.05"
+                        value={wallOffsetZ}
+                        onChange={(e) => setWallOffsetZ(parseFloat(e.target.value))}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+              </div>
+            )}
+
+            {/* TAB 4: DOOR CONTROLS (BLENDER DOOR GLB) */}
+            {activeTab === 'door' && (
+              <div className="space-y-3">
+                {/* Door Status Row */}
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-gray-950/60 p-2.5 rounded-xl border border-gray-800">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <DoorClosed size={14} className="text-purple-400" /> Tür-Grafik:
+                    </span>
+                    {customDoorLoaded ? (
+                      <div className="flex items-center gap-2 bg-purple-950/50 border border-purple-600/50 px-2.5 py-1 rounded-lg text-xs text-purple-200">
+                        <Check size={14} className="text-purple-400" />
+                        <span className="font-semibold truncate max-w-[220px]" title={customDoorName}>
+                          {customDoorName}
+                        </span>
+                        <span className="text-[10px] bg-purple-900/60 text-purple-300 px-1.5 py-0.5 rounded font-mono font-bold">
+                          Tür aktiv
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-400 bg-gray-800/80 px-2.5 py-1 rounded-lg border border-gray-700">
+                        Noch keine eigene Tür geladen
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => doorFileInputRef.current?.click()}
+                      className="px-3 py-1 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors shadow"
+                    >
+                      <Upload size={13} />
+                      <span>{customDoorLoaded ? 'Andere Tür (.glb) laden' : 'Tür (.glb) laden'}</span>
+                    </button>
+
+                    {customDoorLoaded && (
+                      <button
+                        onClick={handleResetDoor}
+                        className="px-2.5 py-1 bg-red-950/40 hover:bg-red-900/60 text-red-300 hover:text-white border border-red-800/50 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
+                        title="Eigene Tür entfernen"
+                      >
+                        <Trash2 size={13} />
+                        <span>Tür entfernen</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Blender Blueprint Specification Box */}
+                <div className="bg-purple-950/30 border border-purple-800/40 rounded-xl p-3 text-xs text-purple-200 flex flex-col md:flex-row md:items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="font-bold flex items-center gap-1.5 text-purple-300">
+                      <span>📐 Blender Tür Spezifikation:</span>
+                      <span className="font-mono bg-purple-900/60 px-2 py-0.5 rounded text-white font-semibold">
+                        Drehpunkt: Mitte des Bodens | 0°: Linke Wand | -90°: Obere Wand
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-300 leading-relaxed">
+                      Die Tür nutzt denselben Drehpunkt wie Boden und Wand. Bei <strong>0°</strong> sitzt sie exakt mittig in der <strong>Left_Wall</strong>. Bei <strong>-90°</strong> Drehung liegt sie passgenau mittig in der <strong>Upper_Wall</strong>.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Left_Door & Upper_Door Controls */}
+                {customDoorLoaded ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* Left_Door Card */}
+                      <div className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
+                        showLeftDoor
+                          ? 'bg-purple-950/40 border-purple-500/80 text-white shadow-md'
+                          : 'bg-gray-900/60 border-gray-800 text-gray-400'
+                      }`}>
+                        <div className="flex items-center gap-2.5">
+                          <div className={`w-3 h-3 rounded-full ${showLeftDoor ? 'bg-purple-400 shadow-sm shadow-purple-400' : 'bg-gray-700'}`} />
+                          <div>
+                            <div className="font-bold text-xs text-white">Left_Door (Linke Wand-Tür)</div>
+                            <div className="text-[10px] text-gray-400">Sitzt in der Mitte der linken Wand (0°)</div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={toggleLeftDoor}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                            showLeftDoor
+                              ? 'bg-purple-600 hover:bg-purple-500 text-white shadow'
+                              : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700'
+                          }`}
+                        >
+                          {showLeftDoor ? 'Aktiv (An)' : 'Aus'}
+                        </button>
+                      </div>
+
+                      {/* Upper_Door Card */}
+                      <div className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
+                        showUpperDoor
+                          ? 'bg-purple-950/40 border-purple-500/80 text-white shadow-md'
+                          : 'bg-gray-900/60 border-gray-800 text-gray-400'
+                      }`}>
+                        <div className="flex items-center gap-2.5">
+                          <div className={`w-3 h-3 rounded-full ${showUpperDoor ? 'bg-purple-400 shadow-sm shadow-purple-400' : 'bg-gray-700'}`} />
+                          <div>
+                            <div className="font-bold text-xs text-white">Upper_Door (Obere Wand-Tür)</div>
+                            <div className="text-[10px] text-gray-400">Um -90° gedreht in der oberen Wand</div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={toggleUpperDoor}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                            showUpperDoor
+                              ? 'bg-purple-600 hover:bg-purple-500 text-white shadow'
+                              : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700'
+                          }`}
+                        >
+                          {showUpperDoor ? 'Aktiv (An)' : 'Aus'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-gray-950/70 p-3 rounded-xl border border-gray-800/80 text-xs">
+                      {/* Presets */}
+                      <div className="space-y-2">
+                        <div className="text-gray-400 font-semibold flex items-center gap-1">
+                          <Layers size={13} className="text-purple-400" /> Schnellauswahl:
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <button
+                            onClick={() => {
+                              setShowLeftDoor(true);
+                              setShowUpperDoor(false);
+                              playTactileSfx('click');
+                            }}
+                            className={`px-2 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                              showLeftDoor && !showUpperDoor
+                                ? 'bg-purple-600 text-white border-purple-400 shadow'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            Nur Left_Door
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShowLeftDoor(false);
+                              setShowUpperDoor(true);
+                              playTactileSfx('click');
+                            }}
+                            className={`px-2 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                              !showLeftDoor && showUpperDoor
+                                ? 'bg-purple-600 text-white border-purple-400 shadow'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            Nur Upper_Door
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShowLeftDoor(true);
+                              setShowUpperDoor(true);
+                              playTactileSfx('click');
+                            }}
+                            className={`px-2 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                              showLeftDoor && showUpperDoor
+                                ? 'bg-purple-600 text-white border-purple-400 shadow'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            Beide Türen
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShowLeftDoor(false);
+                              setShowUpperDoor(false);
+                              playTactileSfx('click');
+                            }}
+                            className={`px-2 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                              !showLeftDoor && !showUpperDoor
+                                ? 'bg-purple-600 text-white border-purple-400 shadow'
+                                : 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            Keine Tür
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Height & Scale */}
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center text-gray-400">
+                          <span className="font-semibold text-purple-300">Höhe (Y): {doorOffsetY.toFixed(2)}m</span>
+                          <button 
+                            onClick={() => setDoorOffsetY(0.0)} 
+                            className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                          >
+                            Reset (0m)
+                          </button>
+                        </div>
+                        <input
+                          type="range"
+                          min="-0.5"
+                          max="0.5"
+                          step="0.02"
+                          value={doorOffsetY}
+                          onChange={(e) => setDoorOffsetY(parseFloat(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+
+                        <div className="flex justify-between items-center text-gray-400 pt-1">
+                          <span className="font-semibold">Skalierung: {doorScale.toFixed(2)}x</span>
+                          <button 
+                            onClick={() => setDoorScale(1.0)} 
+                            className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                          >
+                            1.0x
+                          </button>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.5"
+                          max="2.0"
+                          step="0.05"
+                          value={doorScale}
+                          onChange={(e) => setDoorScale(parseFloat(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Position X & Z Offsets */}
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center text-gray-400">
+                          <span className="font-semibold">Verschiebung X: {doorOffsetX.toFixed(2)}m</span>
+                          <button 
+                            onClick={() => setDoorOffsetX(0.0)} 
+                            className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                          >
+                            0m
+                          </button>
+                        </div>
+                        <input
+                          type="range"
+                          min="-1.5"
+                          max="1.5"
+                          step="0.05"
+                          value={doorOffsetX}
+                          onChange={(e) => setDoorOffsetX(parseFloat(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+
+                        <div className="flex justify-between items-center text-gray-400 pt-1">
+                          <span className="font-semibold">Verschiebung Z: {doorOffsetZ.toFixed(2)}m</span>
+                          <button 
+                            onClick={() => setDoorOffsetZ(0.0)} 
+                            className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                          >
+                            0m
+                          </button>
+                        </div>
+                        <input
+                          type="range"
+                          min="-1.5"
+                          max="1.5"
+                          step="0.05"
+                          value={doorOffsetZ}
+                          onChange={(e) => setDoorOffsetZ(parseFloat(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-6 text-center">
+                    <DoorClosed size={36} className="text-purple-400/80 mx-auto mb-2" />
+                    <h4 className="text-sm font-bold text-gray-200 mb-1">Keine eigene Tür importiert</h4>
+                    <p className="text-xs text-gray-400 max-w-md mx-auto mb-4">
+                      Lade deine Blender Tür-Datei (.glb) hoch. Sie wird automatisch zentriert in der linken Wand platziert (0°) und kann zusätzlich oder alternativ für die obere Wand (-90°) aktiviert werden.
+                    </p>
+                    <button
+                      onClick={() => doorFileInputRef.current?.click()}
+                      className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-xl inline-flex items-center gap-2 transition-colors shadow"
+                    >
+                      <Upload size={14} />
+                      <span>Tür (.glb) jetzt importieren</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Bottom Row Actions & Quick Help */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-gray-800/80">
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setMoveSpeed(prev => (prev === 3.6 ? 5.4 : 3.6))}
@@ -1769,8 +3845,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                 </button>
               </div>
 
-              <div className="text-[11px] text-gray-400 flex items-center gap-1">
-                <span>Steuerung: <strong>Klick auf Kachel</strong> zum Laufen</span>
+              <div className="text-[11px] text-gray-400 flex items-center gap-2">
+                <span className="text-gray-500">Navigation:</span>
+                <span>Klick auf eine Kachel bewegt den Charakter schrittweise</span>
               </div>
             </div>
           </div>
