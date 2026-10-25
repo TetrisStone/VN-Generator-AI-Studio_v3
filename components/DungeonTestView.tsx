@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { 
   ArrowLeft, RotateCcw, Upload, Compass, Shield, User, 
   ChevronDown, ChevronUp, Footprints, Sparkles, Check, 
-  Trash2, Sliders, Film, HelpCircle, Layers, Box, Grid, Square, DoorClosed, Layers as LayersIcon
+  Trash2, Sliders, Film, HelpCircle, Layers, Box, Grid, Square, DoorClosed, Layers as LayersIcon, Move, X,
+  Users, Swords
 } from 'lucide-react';
 import { Character } from '../types';
 import { getItem, setItem } from '../utils/db';
@@ -63,6 +65,128 @@ interface StoredEnvironmentGLBConfig {
   wallLayout?: 'diorama' | 'single' | 'three' | 'four';
 }
 
+// =========================================================================
+// CHUNK LIBRARY & MULTI-PLACEMENT (Grid-Snapping Editor)
+// =========================================================================
+
+type ChunkType = 'floor' | 'wall' | 'door';
+
+// One uploaded GLB file, reusable for arbitrarily many placements
+interface ChunkLibraryEntry {
+  id: string;
+  type: ChunkType;
+  fileName: string;
+  fileSize: number;
+  dataBase64: string; // Data URL
+}
+
+// One placed copy in the chunk grid (1 chunk = 1 cell of 8m x 8m)
+interface PlacedChunkInstance {
+  id: string;
+  type: ChunkType;
+  libraryId: string;
+  cellX: number; // Chunk-grid cell, base chunk = (0, 0)
+  cellZ: number;
+  rotationY: number; // degrees, multiple of 90 (mouse wheel)
+  sectionId?: string; // dungeon section; undefined = root section
+  portalId?: string; // id of the paired door instance (section transition)
+  pairColorIndex?: number; // shared color of the door pair in link mode
+}
+
+interface SectionInfo {
+  id: string;
+  name: string;
+}
+
+interface PlacementSession {
+  type: PlacementType;
+  libId: string;
+  fileName: string;
+  rotationY: number;
+  /** Set while an existing placed instance is being moved (id of that instance) */
+  moveInstanceId?: string;
+  /** Set while an existing placed character is being moved (id of that instance) */
+  moveNpcId?: string;
+}
+
+type ChunkEditMode = 'move' | 'delete' | 'link' | null;
+
+// ---------------------------------------------------------------------------
+// NPC & Enemy characters: GLB figures placed on walkable sub-tiles. Enemies
+// will trigger combat later, neutral characters will become interactable.
+// ---------------------------------------------------------------------------
+
+type NpcKind = 'npc' | 'enemy';
+
+// Placement scope: chunks snap to the 8m chunk grid, characters to sub-tiles
+type PlacementType = ChunkType | NpcKind;
+
+// One uploaded character GLB file, reusable for arbitrarily many placements
+interface NpcLibraryEntry {
+  id: string;
+  kind: NpcKind;
+  fileName: string;
+  fileSize: number;
+  dataBase64: string; // Data URL
+}
+
+// One placed NPC/enemy copy standing on a walkable sub-tile of a section
+interface PlacedNpcInstance {
+  id: string;
+  kind: NpcKind;
+  libraryId: string;
+  col: number; // walkable sub-tile coordinates (x,z in sub-tile steps)
+  row: number;
+  rotationY: number; // degrees, multiple of 90 (mouse wheel)
+  sectionId?: string; // dungeon section; undefined = root section
+}
+
+const CHUNK_LIBRARY_KEY = 'dungeon_chunk_library';
+const CHUNK_PLACEMENTS_KEY = 'dungeon_chunk_placements';
+const CHUNK_SECTIONS_KEY = 'dungeon_sections';
+const NPC_LIBRARY_KEY = 'dungeon_npc_library';
+const NPC_PLACEMENTS_KEY = 'dungeon_npc_placements';
+
+function makePlacementId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+// Ids for placing chunk copies (used by the pointerdown handler)
+// — shared helper so both chunk and npc placements use the same format
+const PLACEMENT_ID_PREFIX = { chunk: 'plt', npc: 'npl' } as const;
+
+// Rotation -> which cell edge the door mesh sits on (left = north at 0,
+// upper = east at -90/270) and its interior approach tile offsets
+const DOOR_EDGE_BY_ROT: Record<number, { i: number; j: number }> = {
+  0: { i: 0, j: -1 },   // north edge  -> tile just inside (south of door)
+  90: { i: -1, j: 0 },  // west edge   -> tile just inside (east of door)
+  180: { i: 0, j: 1 },  // south edge  -> tile just inside (north of door)
+  270: { i: 1, j: 0 }   // east edge   -> tile just inside (west of door)
+};
+// Character facing (radians) while standing IN FRONT of, i.e. with the back
+// towards, a door with that rotation (pointing away from the door into the room)
+const DOOR_BACK_FACING_BY_ROT: Record<number, number> = {
+  0: 0,               // door at north edge, character faces south (into room)
+  90: Math.PI / 2,    // door at west edge, character faces east
+  180: Math.PI,       // door at south edge, character faces north
+  270: -Math.PI / 2   // door at east edge, character faces west
+};
+
+// The walkable sub-tile a door leads to: cell interior tile adjacent to the door
+function doorApproachTile(inst: PlacedChunkInstance): { col: number; row: number } {
+  const rot = ((Math.round(inst.rotationY) % 360) + 360) % 360;
+  const off = DOOR_EDGE_BY_ROT[rot] ?? DOOR_EDGE_BY_ROT[0];
+  return { col: inst.cellX * 3 + off.i, row: inst.cellZ * 3 + off.j };
+}
+
+function doorBackFacingAngle(inst: PlacedChunkInstance): number {
+  const rot = ((Math.round(inst.rotationY) % 360) + 360) % 360;
+  return DOOR_BACK_FACING_BY_ROT[rot] ?? 0;
+}
+
+// Chunk grid cell size: one chunk = 8m x 8m, neighbors share an edge
+const CHUNK_CELL = BLENDER_CHUNK_SIZE;
+
 // Convert tile coordinate to world coordinates with dynamic tile size & surface height
 function tileToWorld(col: number, row: number, tileSize: number = TILE_SIZE, surfaceY: number = 0.05): THREE.Vector3 {
   const x = (col - 1) * tileSize;
@@ -92,6 +216,25 @@ function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer {
   }
   return bytes.buffer;
 }
+
+// Material tuning for static environment chunks (used by base chunk & all placed copies)
+function prepareChunkModel(root: THREE.Object3D) {
+  root.traverse((child: any) => {
+    if (child.isMesh) {
+      child.castShadow = false;
+      child.receiveShadow = false;
+      child.frustumCulled = false;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach((m: any) => {
+        if (m && m.map) {
+          m.map.colorSpace = THREE.SRGBColorSpace;
+          m.map.needsUpdate = true;
+        }
+      });
+    }
+  });
+}
+
 
 // =========================================================================
 // TEXTURE GENERATORS (Matching the Stylized Anime Character from image.png)
@@ -464,8 +607,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   // Active Asset Tab in Dock
   const [activeTab, setActiveTab] = useState<'character' | 'floor' | 'wall' | 'door'>('character');
 
-  // Gameplay state
-  const [characterCoord, setCharacterCoord] = useState<TileCoord>({ col: 1, row: 1 });
+  // Gameplay state (col/row = sub-tile indices on the chunk grid, center = [0,0])
+  const [characterCoord, setCharacterCoord] = useState<TileCoord>({ col: 0, row: 0 });
   const [hoveredCoord, setHoveredCoord] = useState<TileCoord | null>(null);
   const [facingDir, setFacingDir] = useState<Direction>('SOUTH');
   const [animState, setAnimState] = useState<'IDLE' | 'RUN'>('IDLE');
@@ -536,6 +679,115 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     floorOffsetYRef.current = floorOffsetY;
   }, [floorOffsetY]);
 
+  // ---- Chunk library & multi-placement state ----
+  const [chunkLibrary, setChunkLibrary] = useState<ChunkLibraryEntry[]>([]);
+  const chunkLibraryRef = useRef<ChunkLibraryEntry[]>([]);
+  const [placedChunks, setPlacedChunks] = useState<PlacedChunkInstance[]>([]);
+  const placedChunksRef = useRef<PlacedChunkInstance[]>([]);
+  const [placementMode, setPlacementMode] = useState<PlacementSession | null>(null);
+  const placementSceneRef = useRef<{ type: PlacementType; libId: string; gltfScene: THREE.Group; animations?: THREE.AnimationClip[]; moveNpcId?: string } | null>(null);
+  const placementRequestSeqRef = useRef<number>(0);
+  const ghostRotationRef = useRef<number>(0);
+
+  // ---- NPC & enemy figures ----
+  const [npcLibrary, setNpcLibrary] = useState<NpcLibraryEntry[]>([]);
+  const npcLibraryRef = useRef<NpcLibraryEntry[]>([]);
+  const [placedNpcs, setPlacedNpcs] = useState<PlacedNpcInstance[]>([]);
+  const placedNpcsRef = useRef<PlacedNpcInstance[]>([]);
+  // Idle-Animation mixer per placed instance (cleanup entries when deleted)
+  const npcMixersRef = useRef<Array<{ id: string; mixer: THREE.AnimationMixer }>>([]);
+  const placedNpcsGroupRef = useRef<THREE.Group | null>(null);
+  const npcFileInputRef = useRef<HTMLInputElement>(null);
+  const enemyFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Edit modes for already placed chunks (move / delete)
+  const [editMode, setEditMode] = useState<ChunkEditMode>(null);
+  const editModeRef = useRef<ChunkEditMode>(null);
+  useEffect(() => {
+    editModeRef.current = editMode;
+  }, [editMode]);
+
+  // Dungeon sections: the player is always inside one section; links between
+  // paired doors switch sections during play
+  const [sections, setSections] = useState<SectionInfo[]>([{ id: 'root', name: 'Abschnitt 1' }]);
+  const sectionsRef = useRef<SectionInfo[]>([{ id: 'root', name: 'Abschnitt 1' }]);
+  useEffect(() => {
+    sectionsRef.current = sections;
+  }, [sections]);
+  const [activeSection, setActiveSection] = useState<string>('root');
+  const activeSectionRef = useRef<string>('root');
+  // File name of the first door picked while linking two doors
+  const [linkPickName, setLinkPickName] = useState<string | null>(null);
+  // Transient purple info pill (e.g. "door leads nowhere")
+  const [portalHint, setPortalHint] = useState<string | null>(null);
+  const portalHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showPortalHint = useCallback((text: string) => {
+    if (portalHintTimerRef.current) clearTimeout(portalHintTimerRef.current);
+    setPortalHint(text);
+    portalHintTimerRef.current = setTimeout(() => setPortalHint(null), 4500);
+  }, []);
+
+  // Confirm dialog before unlinking a door pair
+  const [unlinkAsk, setUnlinkAsk] = useState<{ doorId: string; label: string } | null>(null);
+  const askUnlinkRef = useRef<(doorId: string, label: string) => void>(() => {});
+  const unlinkDoorRef = useRef<(doorId: string) => void>(() => {});
+  useEffect(() => {
+    askUnlinkRef.current = (doorId, label) => setUnlinkAsk({ doorId, label });
+  }, []);
+  const resolveUnlink = (accepted: boolean) => {
+    const ask = unlinkAsk;
+    setUnlinkAsk(null);
+    if (ask && accepted) unlinkDoorRef.current(ask.doorId);
+  };
+
+  // Camera look-at target, mutable outside the mount effect (section teleport)
+  const camTargetRef = useRef<THREE.Vector3 | null>(null);
+  // Effect <-> component bridges for section focus & door walks
+  const focusSectionRef = useRef<(sectionId: string, door?: PlacedChunkInstance) => void>(() => {});
+  const beginDoorWalkRef = useRef<(door: PlacedChunkInstance) => boolean>(() => false);
+  // Handle click on a door while in link mode (effect scope), and link-mode
+  // enter/exit handling (visibility flip, line display)
+  const handleDoorLinkClickRef = useRef<(door: PlacedChunkInstance) => void>(() => {});
+  const handleLinkModeChangedRef = useRef<(active: boolean) => void>(() => {});
+  // Rebuild the door link glow quads (e.g. after deleting a linked door)
+  const refreshLinkHighlightsRef = useRef<() => void>(() => {});
+  // Called by the movement engine when the character arrives at a clicked door
+  const doorArrivalRef = useRef<(doorId: string) => void>(() => {});
+  // Tile (sub-tile key) where the character is walking to traverse a door
+  const pendingPortalTileRef = useRef<{ col: number; row: number; doorId: string } | null>(null);
+
+  // Three.js mutable references for the placement system (assigned inside mount effect)
+  const ghostGroupRef = useRef<THREE.Group | null>(null);
+  const ghostModelHolderRef = useRef<THREE.Group | null>(null);
+  const ghostMatRef = useRef<THREE.MeshBasicMaterial | null>(null);
+  const ghostFootprintMatRef = useRef<THREE.MeshBasicMaterial | null>(null);
+  const ghostBorderMatRef = useRef<THREE.LineBasicMaterial | null>(null);
+  const placedChunksGroupRef = useRef<THREE.Group | null>(null);
+
+  const syncPlacedGroupRef = useRef<(list: PlacedChunkInstance[]) => void>(null);
+  const syncNpcGroupRef = useRef<(list: PlacedNpcInstance[]) => void>(null);
+  const applyGhostRef = useRef<() => void>(null);
+  const hideGhostRef = useRef<() => void>(() => {});
+  // Restores a carried chunk to its original cell when a move is aborted
+  const restoreMoveRef = useRef<() => void>(() => {});
+
+  // Base chunk occupancy mirrors (scene handlers can't read React state directly)
+  const baseWallFlagsRef = useRef<{ left: boolean; upper: boolean }>({ left: false, upper: false });
+  const baseDoorFlagsRef = useRef<{ left: boolean; upper: boolean }>({ left: false, upper: false });
+  useEffect(() => {
+    baseWallFlagsRef.current = {
+      left: customWallLoaded && showLeftWall,
+      upper: customWallLoaded && showUpperWall
+    };
+  }, [customWallLoaded, showLeftWall, showUpperWall]);
+  useEffect(() => {
+    baseDoorFlagsRef.current = {
+      left: customDoorLoaded && showLeftDoor,
+      upper: customDoorLoaded && showUpperDoor
+    };
+  }, [customDoorLoaded, showLeftDoor, showUpperDoor]);
+
+
   // Animation clips found in GLB
   const [availableClips, setAvailableClips] = useState<string[]>([]);
   const [selectedIdleClip, setSelectedIdleClip] = useState<string>('');
@@ -548,12 +800,12 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     moveSpeedRef.current = moveSpeed;
   }, [moveSpeed]);
 
-  // Dynamic Tile and Surface parameters
-  const currentTileSizeRef = useRef<number>(TILE_SIZE);
+  // Dynamic Tile and Surface parameters (one chunk = 3x3 sub-tiles of 8/3m)
+  const currentTileSizeRef = useRef<number>(BLENDER_TILE_SIZE);
   const currentSurfaceYRef = useRef<number>(0.05);
 
   useEffect(() => {
-    currentTileSizeRef.current = customFloorLoaded ? BLENDER_TILE_SIZE : TILE_SIZE;
+    currentTileSizeRef.current = BLENDER_TILE_SIZE;
     currentSurfaceYRef.current = customFloorLoaded ? (0.25 + floorOffsetY) : 0.05;
   }, [customFloorLoaded, floorOffsetY]);
 
@@ -566,10 +818,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   const characterNaturalHeightRef = useRef<number>(1.85);
   const tileMeshesRef = useRef<THREE.Mesh[]>([]);
   const hoverIndicatorRef = useRef<THREE.Group | null>(null);
+  // Walkable sub-tile keys ("x,z") across the whole dungeon + rebuild trigger
+  const walkableKeysRef = useRef<Set<string>>(new Set(['0,0']));
+  const refreshWalkableTilesRef = useRef<(opts?: { baseFloor?: boolean; section?: string }) => void>(null);
 
-  // Scene Group References
-  const proceduralFloorGroupRef = useRef<THREE.Group | null>(null);
-  const proceduralWallGroupRef = useRef<THREE.Group | null>(null);
+  // Scene Group References (prefab diorama removed - scene starts empty)
   const customFloorGroupRef = useRef<THREE.Group | null>(null);
   const customWallGroupRef = useRef<THREE.Group | null>(null);
   const customDoorGroupRef = useRef<THREE.Group | null>(null);
@@ -585,8 +838,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
   // Movement queue & navigation
   const moveQueueRef = useRef<TileCoord[]>([]);
-  const currentTileRef = useRef<TileCoord>({ col: 1, row: 1 });
-  const characterPosRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0.05, 0));
+  const currentTileRef = useRef<TileCoord>({ col: 0, row: 0 });
+  const characterPosRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
   const targetWorldPosRef = useRef<THREE.Vector3 | null>(null);
   const currentFacingAngleRef = useRef<number>(0);
   const targetFacingAngleRef = useRef<number>(0);
@@ -1104,15 +1357,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     customFloorGroupRef.current.rotation.y = rotY;
     customFloorGroupRef.current.scale.setScalar(scale);
 
-    // Hide procedural floor diorama
-    if (proceduralFloorGroupRef.current) {
-      proceduralFloorGroupRef.current.visible = false;
-    }
-
+    // Base chunk floor defines walkable grid origin
     setCustomFloorLoaded(true);
+    refreshWalkableTilesRef.current?.({ baseFloor: true });
     playTactileSfx('success');
   }, [floorOffsetX, floorOffsetY, floorOffsetZ, floorRotationY, floorScale, playTactileSfx]);
-
   // Mount Custom Wall GLB (Blender 8m x 0.5m x 4m, floor-center pivot)
   const mountWallGLB = useCallback((gltf: any, config?: Partial<StoredEnvironmentGLBConfig>) => {
     if (!sceneRef.current || !customWallGroupRef.current) return;
@@ -1170,11 +1419,6 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     customWallGroupRef.current.rotation.y = baseRotY;
     customWallGroupRef.current.scale.setScalar(scale);
     customWallGroupRef.current.visible = true;
-
-    // Hide procedural walls
-    if (proceduralWallGroupRef.current) {
-      proceduralWallGroupRef.current.visible = false;
-    }
 
     setCustomWallLoaded(true);
     playTactileSfx('success');
@@ -1257,6 +1501,265 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     mountDoorGLBRef.current = mountDoorGLB;
   }, [mountDoorGLB]);
 
+  // =========================================================================
+  // CHUNK LIBRARY & MULTI-PLACEMENT (Grid-Snapping Editor)
+  // =========================================================================
+
+  // Register an uploaded GLB file in the reusable chunk library
+  const addChunkLibraryEntry = useCallback(async (type: ChunkType, fileName: string, fileSize: number, dataBase64: string) => {
+    const entry: ChunkLibraryEntry = {
+      id: `chunk_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`,
+      type,
+      fileName,
+      fileSize,
+      dataBase64
+    };
+    const next = [...chunkLibraryRef.current, entry];
+    chunkLibraryRef.current = next;
+    setChunkLibrary(next);
+    try {
+      await setItem(CHUNK_LIBRARY_KEY, next);
+    } catch (e) {
+      console.warn('Could not save chunk library:', e);
+    }
+  }, []);
+
+  // Remove a library entry (and every placed copy that used it)
+  const removeChunkLibraryEntry = useCallback(async (id: string) => {
+    const entry = chunkLibraryRef.current.find(e => e.id === id);
+    // Exit placement mode if the removed file was being placed
+    if (placementSceneRef.current?.libId === id) {
+      placementSceneRef.current = null;
+      placementRequestSeqRef.current += 1;
+      setPlacementMode(null);
+      hideGhostRef.current?.();
+    }
+
+    const removed = placedChunksRef.current.filter(p => p.libraryId === id);
+    // Free portal partners of removed linked doors
+    removed.forEach(p => {
+      if (!p.portalId) return;
+      const partner = placedChunksRef.current.find(q => q.id === p.portalId);
+      if (partner) {
+        partner.portalId = undefined;
+        partner.pairColorIndex = undefined;
+      }
+    });
+    const remaining = placedChunksRef.current.filter(p => p.libraryId !== id);
+    placedChunksRef.current = remaining;
+    setPlacedChunks(remaining);
+    try {
+      await setItem(CHUNK_PLACEMENTS_KEY, remaining);
+    } catch (e) {
+      console.warn('Could not save chunk placements:', e);
+    }
+    syncPlacedGroupRef.current?.(remaining);
+    refreshWalkableTilesRef.current?.();
+
+    const nextLib = chunkLibraryRef.current.filter(e => e.id !== id);
+    chunkLibraryRef.current = nextLib;
+    setChunkLibrary(nextLib);
+    try {
+      await setItem(CHUNK_LIBRARY_KEY, nextLib);
+    } catch (e) {
+      console.warn('Could not save chunk library:', e);
+    }
+    playTactileSfx('click');
+    if (entry) console.info(`Chunk "${entry.fileName}" aus der Bibliothek entfernt.`);
+  }, [playTactileSfx]);
+
+  // Apply a new list of placed chunks (removals happen here)
+  const updatePlacements = useCallback(async (list: PlacedChunkInstance[]) => {
+    placedChunksRef.current = list;
+    setPlacedChunks(list);
+    try {
+      await setItem(CHUNK_PLACEMENTS_KEY, list);
+    } catch (e) {
+      console.warn('Could not save chunk placements:', e);
+    }
+    syncPlacedGroupRef.current?.(list);
+    refreshWalkableTilesRef.current?.();
+  }, []);
+
+  // Register an uploaded character GLB in the reusable NPC/enemy library
+  const addNpcLibraryEntry = useCallback(async (kind: NpcKind, fileName: string, fileSize: number, dataBase64: string) => {
+    const entry: NpcLibraryEntry = {
+      id: makePlacementId('npc_lib'),
+      kind,
+      fileName,
+      fileSize,
+      dataBase64
+    };
+    const next = [...npcLibraryRef.current, entry];
+    npcLibraryRef.current = next;
+    setNpcLibrary(next);
+    try {
+      await setItem(NPC_LIBRARY_KEY, next);
+    } catch (e) {
+      console.warn('Could not save npc library:', e);
+    }
+  }, []);
+
+  // Remove a character library entry (and every placed copy that used it)
+  const removeNpcLibraryEntry = useCallback(async (id: string) => {
+    const entry = npcLibraryRef.current.find(e => e.id === id);
+    // Exit placement mode if the removed file was being placed
+    if (placementSceneRef.current?.libId === id) {
+      placementSceneRef.current = null;
+      placementRequestSeqRef.current += 1;
+      setPlacementMode(null);
+      hideGhostRef.current?.();
+    }
+    const remaining = placedNpcsRef.current.filter(p => p.libraryId !== id);
+    placedNpcsRef.current = remaining;
+    setPlacedNpcs(remaining);
+    try {
+      await setItem(NPC_PLACEMENTS_KEY, remaining);
+    } catch (e) {
+      console.warn('Could not save npc placements:', e);
+    }
+    syncNpcGroupRef.current?.(remaining);
+
+    const nextLib = npcLibraryRef.current.filter(e => e.id !== id);
+    npcLibraryRef.current = nextLib;
+    setNpcLibrary(nextLib);
+    try {
+      await setItem(NPC_LIBRARY_KEY, nextLib);
+    } catch (e) {
+      console.warn('Could not save npc library:', e);
+    }
+    playTactileSfx('click');
+    if (entry) console.info(`Charakter "${entry.fileName}" aus der Bibliothek entfernt.`);
+  }, [playTactileSfx]);
+
+  // Remove all placed copies of one type
+  const clearPlacementsOfType = useCallback(async (type: ChunkType) => {
+    // Exit placement mode if a copy of this type was being placed
+    if (placementSceneRef.current?.type === type) {
+      placementSceneRef.current = null;
+      placementRequestSeqRef.current += 1;
+      setPlacementMode(null);
+      hideGhostRef.current?.();
+    }
+    // Free portal partners of removed linked doors
+    placedChunksRef.current
+      .filter(p => p.type === type && p.portalId)
+      .forEach(p => {
+        const partner = placedChunksRef.current.find(q => q.id === p.portalId);
+        if (partner) {
+          partner.portalId = undefined;
+          partner.pairColorIndex = undefined;
+        }
+      });
+    const remaining = placedChunksRef.current.filter(p => p.type !== type);
+    placedChunksRef.current = remaining;
+    setPlacedChunks(remaining);
+    try {
+      await setItem(CHUNK_PLACEMENTS_KEY, remaining);
+    } catch (e) {
+      console.warn('Could not save chunk placements:', e);
+    }
+    syncPlacedGroupRef.current?.(remaining);
+    refreshWalkableTilesRef.current?.();
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
+  // Enter Placement Mode: parse the library GLB and show a snapping ghost
+  // Works for chunk types (8m grid) and character kinds (sub-tile grid)
+  const startPlacement = useCallback((type: PlacementType, entry: ChunkLibraryEntry | NpcLibraryEntry) => {
+    setHoveredCoord(null);
+    setIsLoadingModel(true);
+    setLoadingMessage(type === 'npc' || type === 'enemy'
+      ? `Platzierungsmodus: Charakter "${entry.fileName}"...`
+      : `Platzierungsmodus: "${entry.fileName}"...`);
+    // Placing something leaves any chunk edit mode
+    editModeRef.current = null;
+    setEditMode(null);
+    handleLinkModeChangedRef.current(false);
+    try {
+      const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+      const requestToken = ++placementRequestSeqRef.current;
+      new GLTFLoader().parse(buffer, '', (gltf) => {
+        // User may have cancelled while the file was still parsing
+        if (requestToken !== placementRequestSeqRef.current) {
+          setIsLoadingModel(false);
+          return;
+        }
+        ghostRotationRef.current = 0;
+        placementSceneRef.current = {
+          type,
+          libId: entry.id,
+          gltfScene: gltf.scene,
+          animations: gltf.animations || []
+        };
+        setPlacementMode({ type, libId: entry.id, fileName: entry.fileName, rotationY: 0 });
+        setIsLoadingModel(false);
+        applyGhostRef.current?.();
+        playTactileSfx('success');
+      }, (err) => {
+        console.error('Placement GLTF parse error:', err);
+        setIsLoadingModel(false);
+      });
+    } catch (err: any) {
+      console.error('Placement file read error:', err);
+      setIsLoadingModel(false);
+    }
+  }, [playTactileSfx]);
+
+  // Leave Placement Mode
+  const cancelPlacement = useCallback(() => {
+    if (!placementSceneRef.current) return;
+    // An aborted move puts the carried chunk back on its original cell
+    restoreMoveRef.current?.();
+    placementSceneRef.current = null;
+    placementRequestSeqRef.current += 1;
+    setPlacementMode(null);
+    hideGhostRef.current?.();
+    playTactileSfx('hover');
+  }, [playTactileSfx]);
+
+  // Toggle a chunk edit mode (move / delete / link doors on placed chunks)
+  const toggleEditMode = useCallback((mode: Exclude<ChunkEditMode, null>) => {
+    if (editModeRef.current === mode) {
+      editModeRef.current = null;
+      setEditMode(null);
+      handleLinkModeChangedRef.current(false);
+    } else {
+      // Entering an edit mode leaves any active placement session
+      if (placementSceneRef.current) {
+        restoreMoveRef.current?.();
+        placementSceneRef.current = null;
+        placementRequestSeqRef.current += 1;
+        setPlacementMode(null);
+        hideGhostRef.current?.();
+      }
+      editModeRef.current = mode;
+      setEditMode(mode);
+      handleLinkModeChangedRef.current(mode === 'link');
+    }
+    playTactileSfx('hover');
+  }, [playTactileSfx]);
+
+  // Create a new empty dungeon section and jump to it
+  const createSection = useCallback(() => {
+    const num = sectionsRef.current.length + 1;
+    const newSection: SectionInfo = { id: `sec_${Date.now().toString(36)}`, name: `Abschnitt ${num}` };
+    const merged = [...sectionsRef.current, newSection];
+    setSections(merged);
+    setItem(CHUNK_SECTIONS_KEY, merged.filter(s => s.id !== 'root')).catch((e) => {
+      console.warn('Could not save dungeon sections:', e);
+    });
+    focusSectionRef.current(newSection.id);
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
+  // Switch the section the player/editor is looking at
+  const selectSection = useCallback((id: string) => {
+    if (id === activeSectionRef.current) return;
+    focusSectionRef.current(id);
+    playTactileSfx('click');
+  }, [playTactileSfx]);
+
   // Load Character GLB File
   const processGLBFile = useCallback(async (file: File) => {
     setIsLoadingModel(true);
@@ -1310,6 +1813,33 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   }, [mountGLBModel, useRawCharacterScale]);
 
   // Load Floor Chunk GLB File (8m x 8m)
+  // Upload a character GLB and register it in the NPC/enemy library
+  // (no scene mounting: figures appear once they are placed in the dungeon)
+  const processNpcGLBFile = useCallback(async (file: File, kind: NpcKind) => {
+    const kindLabel = kind === 'enemy' ? 'Gegner' : 'Neutralen-Charakter';
+    setIsLoadingModel(true);
+    setLoadingMessage(`Lade ${kindLabel} "${file.name}"...`);
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+
+      new GLTFLoader().parse(arrayBuffer, '', async () => {
+        await addNpcLibraryEntry(kind, file.name, file.size, base64DataUrl);
+        setIsLoadingModel(false);
+        playTactileSfx('success');
+      }, (err: any) => {
+        console.error(`${kindLabel} GLTF parse error:`, err);
+        alert(`Fehler beim Einlesen der Charakter-GLB: ${err?.message ?? err}`);
+        setIsLoadingModel(false);
+      });
+    } catch (err: any) {
+      console.error(`${kindLabel} file read error:`, err);
+      alert('Fehler beim Laden der Datei: ' + err.message);
+      setIsLoadingModel(false);
+    }
+  }, [addNpcLibraryEntry, playTactileSfx]);
+
+  // Load Floor GLB File
   const processFloorGLBFile = useCallback(async (file: File) => {
     setIsLoadingModel(true);
     setLoadingMessage(`Lade Bodenplatte "${file.name}" (8x8m)...`);
@@ -1337,7 +1867,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         setFloorOffsetZ(0.0);
         setFloorRotationY(0);
 
-        try {
+        // Register in chunk library (file can be re-selected for additional grid copies)
+        addChunkLibraryEntry('floor', file.name, file.size, base64DataUrl);        try {
           await setItem(STORAGE_KEY_FLOOR_GLB, {
             fileName: file.name,
             fileSize: file.size,
@@ -1363,7 +1894,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       alert("Fehler beim Laden der Datei: " + err.message);
       setIsLoadingModel(false);
     }
-  }, [mountFloorGLB]);
+  }, [mountFloorGLB, addChunkLibraryEntry]);
 
   // Load Wall GLB File (8m length, 4m height)
   const processWallGLBFile = useCallback(async (file: File) => {
@@ -1395,7 +1926,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         setWallOffsetZ(0.0);
         setWallRotationY(0);
 
-        try {
+        // Register in chunk library (file can be re-selected for additional grid copies)
+        addChunkLibraryEntry('wall', file.name, file.size, base64DataUrl);        try {
           await setItem(STORAGE_KEY_WALL_GLB, {
             fileName: file.name,
             fileSize: file.size,
@@ -1423,7 +1955,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       alert("Fehler beim Laden der Datei: " + err.message);
       setIsLoadingModel(false);
     }
-  }, [mountWallGLB, showLeftWall, showUpperWall]);
+  }, [mountWallGLB, showLeftWall, showUpperWall, addChunkLibraryEntry]);
 
   // Load Door GLB File (center of left wall at 0°, center of upper wall at -90°)
   const processDoorGLBFile = useCallback(async (file: File) => {
@@ -1455,7 +1987,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         setDoorOffsetZ(0.0);
         setDoorRotationY(0);
 
-        try {
+        // Register in chunk library (file can be re-selected for additional grid copies)
+        addChunkLibraryEntry('door', file.name, file.size, base64DataUrl);        try {
           await setItem(STORAGE_KEY_DOOR_GLB, {
             fileName: file.name,
             fileSize: file.size,
@@ -1483,7 +2016,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       alert("Fehler beim Laden der Tür-Datei: " + err.message);
       setIsLoadingModel(false);
     }
-  }, [mountDoorGLB, showLeftDoor, showUpperDoor]);
+  }, [mountDoorGLB, showLeftDoor, showUpperDoor, addChunkLibraryEntry]);
 
   // Load a character's 3D model from the project
   const loadCharacterFromProject = useCallback(async (char: Character) => {
@@ -1556,7 +2089,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     playTactileSfx('click');
   }, [createAnimeKnightDummy, playTactileSfx]);
 
-  // Revert Floor to procedural diorama
+  // Revert Floor: remove base chunk (prefab floor no longer exists)
   const handleResetFloor = useCallback(async () => {
     try {
       await setItem(STORAGE_KEY_FLOOR_GLB, null);
@@ -1569,11 +2102,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       }
       customFloorGroupRef.current.visible = false;
     }
-    if (proceduralFloorGroupRef.current) {
-      proceduralFloorGroupRef.current.visible = true;
-    }
     floorGltfSceneRef.current = null;
     setCustomFloorLoaded(false);
+    refreshWalkableTilesRef.current?.({ baseFloor: false });
     setCustomFloorName('');
     setCustomFloorSize(0);
     setFloorScale(1.0);
@@ -1584,7 +2115,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     playTactileSfx('click');
   }, [playTactileSfx]);
 
-  // Revert Wall to procedural walls
+  // Revert Wall: remove base wall chunk
   const handleResetWall = useCallback(async () => {
     try {
       await setItem(STORAGE_KEY_WALL_GLB, null);
@@ -1596,9 +2127,6 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         customWallGroupRef.current.remove(customWallGroupRef.current.children[0]);
       }
       customWallGroupRef.current.visible = false;
-    }
-    if (proceduralWallGroupRef.current) {
-      proceduralWallGroupRef.current.visible = true;
     }
     wallGltfSceneRef.current = null;
     setCustomWallLoaded(false);
@@ -1732,11 +2260,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     mountDoorGLBRef.current({ scene: doorGltfSceneRef.current });
   }, [showLeftDoor, showUpperDoor, customDoorLoaded]);
 
-  // Dynamic Tile Position Helper based on active Floor Size (8m vs 7.2m) and Surface Height
+  // Dynamic Tile Position Helper: sub-tile indices on the chunk grid (one chunk = 3x3 tiles of 8/3m)
   const getTileWorldPos = useCallback((col: number, row: number) => {
-    const tSize = customFloorLoadedRef.current ? (8.0 / 3) : TILE_SIZE;
     const sY = customFloorLoadedRef.current ? (0.25 + floorOffsetYRef.current) : 0.05;
-    return new THREE.Vector3((col - 1) * tSize, sY, (row - 1) * tSize);
+    return new THREE.Vector3(col * BLENDER_TILE_SIZE, sY, row * BLENDER_TILE_SIZE);
   }, []);
 
   const getTileWorldPosRef = useRef(getTileWorldPos);
@@ -1744,31 +2271,22 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     getTileWorldPosRef.current = getTileWorldPos;
   }, [getTileWorldPos]);
 
-  // Synchronize 3x3 clickable floor tiles when custom floor is loaded or offset Y changes
+  // Synchronize clickable floor tiles (dynamic set across all floor chunks)
   useEffect(() => {
-    const tSize = customFloorLoaded ? (8.0 / 3) : TILE_SIZE;
+    const tSize = BLENDER_TILE_SIZE;
     const sY = customFloorLoaded ? (0.25 + floorOffsetY) : 0.05;
 
     tileMeshesRef.current.forEach((tMesh) => {
-      const col = tMesh.userData.col;
-      const row = tMesh.userData.row;
-      const x = (col - 1) * tSize;
-      const z = (row - 1) * tSize;
-      tMesh.position.set(x, sY + 0.015, z);
-      tMesh.geometry.dispose();
-      tMesh.geometry = new THREE.PlaneGeometry(tSize - 0.06, tSize - 0.06);
+      tMesh.position.set(tMesh.userData.col * tSize, sY + 0.015, tMesh.userData.row * tSize);
     });
 
     // If standing still, update character Y position so it rests flush on the floor surface
     if (characterRootRef.current && targetWorldPosRef.current === null) {
-      const col = currentTileRef.current.col;
-      const row = currentTileRef.current.row;
-      const x = (col - 1) * tSize;
-      const z = (row - 1) * tSize;
-      characterPosRef.current.set(x, sY, z);
-      characterRootRef.current.position.set(x, sY, z);
+      const pos = getTileWorldPos(currentTileRef.current.col, currentTileRef.current.row);
+      characterPosRef.current.set(pos.x, sY, pos.z);
+      characterRootRef.current.position.set(pos.x, sY, pos.z);
     }
-  }, [customFloorLoaded, floorOffsetY]);
+  }, [customFloorLoaded, floorOffsetY, getTileWorldPos]);
 
   // Compute direction angle (in radians) between 2 tiles
   const getCardinalAngle = (from: TileCoord, to: TileCoord): { angle: number; dir: Direction } => {
@@ -1786,34 +2304,71 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     }
   };
 
-  // Plan path on 3x3 grid (step-by-step cardinal waypoints)
+  // Plan path with BFS across all walkable dungeon tiles (chunk-safe, avoids holes)
   const planPath = (start: TileCoord, end: TileCoord): TileCoord[] => {
+    const walkable = walkableKeysRef.current;
+    const tileKey = (c: number, r: number) => `${c},${r}`;
+    const startKey = tileKey(start.col, start.row);
+    const endKey = tileKey(end.col, end.row);
+
+    if (startKey === endKey) return [];
+    if (!walkable.has(endKey)) return [];
+
+    const visited = new Set([startKey]);
+    const prevMap = new Map<string, string>();
+    const queue: TileCoord[] = [start];
+    let head = 0;
+    let found = false;
+
+    while (head < queue.length && !found) {
+      const cur = queue[head++];
+      for (const nxt of [
+        { col: cur.col + 1, row: cur.row },
+        { col: cur.col - 1, row: cur.row },
+        { col: cur.col, row: cur.row + 1 },
+        { col: cur.col, row: cur.row - 1 }
+      ]) {
+        const k = tileKey(nxt.col, nxt.row);
+        if (visited.has(k)) continue;
+        visited.add(k);
+        prevMap.set(k, tileKey(cur.col, cur.row));
+        if (k === endKey) { found = true; break; }
+        if (walkable.has(k)) queue.push(nxt);
+      }
+    }
+
+    if (!visited.has(endKey)) return [];
+
     const path: TileCoord[] = [];
-    let curCol = start.col;
-    let curRow = start.row;
-
-    while (curCol !== end.col) {
-      curCol += end.col > curCol ? 1 : -1;
-      path.push({ col: curCol, row: curRow });
+    let k = endKey;
+    while (k !== startKey) {
+      const [c, r] = k.split(',').map(Number);
+      path.push({ col: c, row: r });
+      k = prevMap.get(k)!;
     }
-
-    while (curRow !== end.row) {
-      curRow += end.row > curRow ? 1 : -1;
-      path.push({ col: curCol, row: curRow });
-    }
-
+    path.reverse();
     return path;
   };
 
-  // Handle Tile Click: 4-way turn, run anim, step-by-step movement
+  // Handle Tile Click: BFS path over the whole dungeon, run anim, step-by-step movement
   const handleTileClick = useCallback((targetCol: number, targetRow: number) => {
+    // Any new tile walk drops a pending door traversal
+    pendingPortalTileRef.current = null;
     const current = currentTileRef.current;
     if (current.col === targetCol && current.row === targetRow) {
       return;
     }
 
+    if (!walkableKeysRef.current.has(`${targetCol},${targetRow}`)) {
+      playTactileSfx('hover');
+      return;
+    }
+
     const waypoints = planPath(current, { col: targetCol, row: targetRow });
-    if (waypoints.length === 0) return;
+    if (waypoints.length === 0) {
+      playTactileSfx('hover');
+      return;
+    }
 
     moveQueueRef.current = waypoints;
     const firstStep = waypoints[0];
@@ -1832,12 +2387,56 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     targetWorldPosRef.current = getTileWorldPos(firstStep.col, firstStep.row);
   }, [playTactileSfx, updateMovementAnimation, getTileWorldPos]);
 
-  // Reset character to (1,1) Center Tile
+  // -----------------------------------------------------------------------
+  // Dungeon sections: click-to-walk on a door then section change on arrival
+  // -----------------------------------------------------------------------
+
+  // Walk to a door with the mouse. Returns true when a path was found; on
+  // arrival the paired section is entered (movement engine calls doorArrivalRef)
+  const beginDoorWalk = useCallback((door: PlacedChunkInstance): boolean => {
+    const tile = doorApproachTile(door);
+    const queueBefore = moveQueueRef.current.length;
+    handleTileClickRef.current(tile.col, tile.row);
+    if (moveQueueRef.current.length === queueBefore) {
+      // No path found (e.g. missing floor) — the walk was not possible
+      pendingPortalTileRef.current = null;
+      return false;
+    }
+    pendingPortalTileRef.current = { col: tile.col, row: tile.row, doorId: door.id };
+    playTactileSfx('click');
+    return true;
+  }, [playTactileSfx]);
+  useEffect(() => {
+    beginDoorWalkRef.current = beginDoorWalk;
+  }, [beginDoorWalk]);
+
+  // Spawn into the section the paired door leads to, standing with the back
+  // towards that door (facing away from it into the room)
+  const transitionThroughDoor = useCallback((doorId: string) => {
+    const door = placedChunksRef.current.find(p => p.id === doorId);
+    if (!door) return;
+    const partner = door.portalId
+      ? placedChunksRef.current.find(p => p.id === door.portalId)
+      : undefined;
+    if (!partner) {
+      // Decorative door without a pair: just stop in front of it
+      playTactileSfx('hover');
+      showPortalHint('Diese Tür führt nirgendwohin. Verbinde sie über „Türen verbinden" mit einer Partner-Tür in einem anderen Abschnitt.');
+      return;
+    }
+    focusSectionRef.current(partner.sectionId ?? 'root', partner);
+    playTactileSfx('success');
+  }, [playTactileSfx, showPortalHint]);
+  useEffect(() => {
+    doorArrivalRef.current = transitionThroughDoor;
+  }, [transitionThroughDoor]);
+
+  // Reset character to [0,0] Center Tile
   const resetToCenter = useCallback(() => {
     moveQueueRef.current = [];
-    currentTileRef.current = { col: 1, row: 1 };
+    currentTileRef.current = { col: 0, row: 0 };
     targetWorldPosRef.current = null;
-    const centerPos = getTileWorldPos(1, 1);
+    const centerPos = getTileWorldPos(0, 0);
     characterPosRef.current.copy(centerPos);
     targetFacingAngleRef.current = 0;
     currentFacingAngleRef.current = 0;
@@ -1847,7 +2446,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       characterRootRef.current.rotation.y = 0;
     }
 
-    setCharacterCoord({ col: 1, row: 1 });
+    setCharacterCoord({ col: 0, row: 0 });
     setFacingDir('SOUTH');
     setAnimState('IDLE');
     updateMovementAnimation(false);
@@ -1881,8 +2480,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     scene.background = new THREE.Color(0x18181b);
     sceneRef.current = scene;
 
-    // 2. Camera: Fixed Isometric Orthographic Camera at 45° tilt
-    const frustumSize = 11.2;
+    // 2. Camera: Fixed Isometric Orthographic Camera at 45° tilt (mouse wheel zooms)
+    let frustumSize = 11.2;
     const aspect = container.clientWidth / container.clientHeight;
     const camera = new THREE.OrthographicCamera(
       (-frustumSize * aspect) / 2,
@@ -1895,7 +2494,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
     const camDist = 24;
     camera.position.set(-camDist, camDist * 1.15, camDist);
-    camera.lookAt(0, 0.45, 0);
+    // Shared look-at target (component ref: section teleports can recenter it)
+    const camTarget = camTargetRef.current ?? new THREE.Vector3(0, 0.45, 0);
+    camTargetRef.current = camTarget;
+    camTarget.set(0, 0.45, 0);
+    camera.lookAt(camTarget);
     cameraRef.current = camera;
 
     // 3. Renderer
@@ -1919,46 +2522,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     fillLight.position.set(15, 10, -15);
     scene.add(fillLight);
 
-    // 5. Stylized Diorama Platform Slab & Floor
-    const proceduralFloorGroup = new THREE.Group();
-    proceduralFloorGroup.name = 'ProceduralFloorGroup';
-
-    const plinthHeight = 1.1;
-    const plinthGeo = new THREE.CylinderGeometry(
-      PLATFORM_HALF * Math.SQRT2,
-      PLATFORM_HALF * Math.SQRT2 + 0.15,
-      plinthHeight,
-      4,
-      1,
-      false,
-      Math.PI / 4
-    );
-    const plinthMat = new THREE.MeshLambertMaterial({ color: 0x3d3b38 });
-    const plinthMesh = new THREE.Mesh(plinthGeo, plinthMat);
-    plinthMesh.position.y = -plinthHeight / 2;
-    proceduralFloorGroup.add(plinthMesh);
-
-    const curbGeo = new THREE.BoxGeometry(PLATFORM_HALF * 2 + 0.16, 0.22, PLATFORM_HALF * 2 + 0.16);
-    const curbMat = new THREE.MeshLambertMaterial({ color: 0x4a4744 });
-    const curbMesh = new THREE.Mesh(curbGeo, curbMat);
-    curbMesh.position.y = -0.11;
-    proceduralFloorGroup.add(curbMesh);
-
-    const floorCanvas = createStylizedFloorCanvas();
-    const floorTexture = new THREE.CanvasTexture(floorCanvas);
-    floorTexture.colorSpace = THREE.SRGBColorSpace;
-
-    const floorGeo = new THREE.PlaneGeometry(PLATFORM_HALF * 2, PLATFORM_HALF * 2);
-    const floorMat = new THREE.MeshLambertMaterial({ map: floorTexture });
-    const floorMesh = new THREE.Mesh(floorGeo, floorMat);
-    floorMesh.rotation.x = -Math.PI / 2;
-    floorMesh.position.y = 0.005;
-    proceduralFloorGroup.add(floorMesh);
-
-    scene.add(proceduralFloorGroup);
-    proceduralFloorGroupRef.current = proceduralFloorGroup;
-
-    // Custom 3D Floor Group (for user Blender 8x8m GLB)
+    // 5. Custom chunk groups (prefab diorama removed - dungeon is built from GLB chunks)
     const customFloorGroup = new THREE.Group();
     customFloorGroup.name = 'CustomFloorGroup';
     scene.add(customFloorGroup);
@@ -1976,39 +2540,94 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     scene.add(customDoorGroup);
     customDoorGroupRef.current = customDoorGroup;
 
-    // 6. 3x3 Clickable Floor Tile Grid
+    // Placed chunk copies group (multi-placement grid building)
+    const placedChunksGroup = new THREE.Group();
+    placedChunksGroup.name = 'PlacedChunksGroup';
+    scene.add(placedChunksGroup);
+    placedChunksGroupRef.current = placedChunksGroup;
+
+    // Placed NPC/enemy characters (stand idle on walkable sub-tiles)
+    const placedNpcsGroup = new THREE.Group();
+    placedNpcsGroup.name = 'PlacedNpcGroup';
+    scene.add(placedNpcsGroup);
+    placedNpcsGroupRef.current = placedNpcsGroup;
+
+    // Soft glow shells around doors while linking (only the active section)
+    const doorGlowGroup = new THREE.Group();
+    doorGlowGroup.name = 'DoorLinkGlows';
+    doorGlowGroup.visible = false;
+    scene.add(doorGlowGroup);
+
+    // Placement ghost group: translucent model copy + colored footprint (blue=free, red=occupied)
+    const ghostGroup = new THREE.Group();
+    ghostGroup.name = 'PlacementGhostGroup';
+    ghostGroup.visible = false;
+    scene.add(ghostGroup);
+    ghostGroupRef.current = ghostGroup;
+
+    const ghostFootprintMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.25,
+      depthWrite: false
+    });
+    ghostFootprintMatRef.current = ghostFootprintMat;
+    const ghostFootprint = new THREE.Mesh(
+      new THREE.PlaneGeometry(CHUNK_CELL - 0.12, CHUNK_CELL - 0.12),
+      ghostFootprintMat
+    );
+    ghostFootprint.rotation.x = -Math.PI / 2;
+    ghostFootprint.position.y = 0.27;
+    ghostGroup.add(ghostFootprint);
+
+    const ghostBorderMat = new THREE.LineBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.65,
+      depthWrite: false
+    });
+    ghostBorderMatRef.current = ghostBorderMat;
+    const ghostBorder = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.PlaneGeometry(CHUNK_CELL, CHUNK_CELL)),
+      ghostBorderMat
+    );
+    ghostBorder.rotation.x = -Math.PI / 2;
+    ghostBorder.position.y = 0.275;
+    ghostGroup.add(ghostBorder);
+
+    const ghostMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.38,
+      depthWrite: false
+    });
+    ghostMatRef.current = ghostMat;
+
+    const ghostModelHolder = new THREE.Group();
+    ghostModelHolder.name = 'GhostModelHolder';
+    ghostGroup.add(ghostModelHolder);
+    ghostModelHolderRef.current = ghostModelHolder;
+
+    // 6. Clickable Floor Tile Grid (built dynamically across all placed floor chunks)
     tileMeshesRef.current = [];
     const tilesGroup = new THREE.Group();
     tilesGroup.name = 'TileGridGroup';
-
-    for (let r = 0; r < 3; r++) {
-      for (let c = 0; c < 3; c++) {
-        const tileMeshGeo = new THREE.PlaneGeometry(TILE_SIZE - 0.06, TILE_SIZE - 0.06);
-        const tileMeshMat = new THREE.MeshBasicMaterial({
-          color: 0x38bdf8,
-          transparent: true,
-          opacity: 0.0,
-          depthWrite: false
-        });
-        const tMesh = new THREE.Mesh(tileMeshGeo, tileMeshMat);
-        tMesh.rotation.x = -Math.PI / 2;
-        const wPos = tileToWorld(c, r);
-        tMesh.position.set(wPos.x, 0.02, wPos.z);
-        tMesh.userData = { col: c, row: r };
-
-        tilesGroup.add(tMesh);
-        tileMeshesRef.current.push(tMesh);
-      }
-    }
     scene.add(tilesGroup);
+
+    const tileMeshMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.0,
+      depthWrite: false
+    });
 
     // 7. Dynamic Hover Indicator: Transparent Light-Blue Surface (2.67m x 2.67m tile)
     const hoverGroup = new THREE.Group();
     hoverGroup.visible = false;
     hoverIndicatorRef.current = hoverGroup;
 
-    // Tile Wash Plane: Exactly 2.67m x 2.67m (2.64m with 3cm margin)
-    const tileWashGeo = new THREE.PlaneGeometry(2.64, 2.64);
+    // Tile Wash Plane: 8/3m sub-tile with small margin
+    const tileWashGeo = new THREE.PlaneGeometry(BLENDER_TILE_SIZE - 0.06, BLENDER_TILE_SIZE - 0.06);
     const tileWashMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
       transparent: true,
@@ -2022,156 +2641,6 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     hoverGroup.position.y = 0.035;
     scene.add(hoverGroup);
 
-    // 8. Architectural Walls & Arched Doorway (North & East Walls)
-    const proceduralWallGroup = new THREE.Group();
-    proceduralWallGroup.name = 'ProceduralWallGroup';
-
-    const wallCanvas = createStylizedWallCanvas();
-    const wallTexture = new THREE.CanvasTexture(wallCanvas);
-    wallTexture.colorSpace = THREE.SRGBColorSpace;
-    const wallMat = new THREE.MeshLambertMaterial({ map: wallTexture });
-    const trimStoneMat = new THREE.MeshLambertMaterial({ color: 0x5a5752 });
-
-    const northWallGeo = new THREE.BoxGeometry(PLATFORM_HALF * 2, WALL_HEIGHT, WALL_THICKNESS);
-    const northWall = new THREE.Mesh(northWallGeo, wallMat);
-    northWall.position.set(0, WALL_HEIGHT / 2, -PLATFORM_HALF - WALL_THICKNESS / 2);
-    proceduralWallGroup.add(northWall);
-
-    const baseboardGeo = new THREE.BoxGeometry(PLATFORM_HALF * 2 + 0.1, 0.28, 0.18);
-    const northBaseboard = new THREE.Mesh(baseboardGeo, trimStoneMat);
-    northBaseboard.position.set(0, 0.14, -PLATFORM_HALF + 0.09);
-    proceduralWallGroup.add(northBaseboard);
-
-    const northCorniceGeo = new THREE.BoxGeometry(PLATFORM_HALF * 2 + 0.35, 0.35, WALL_THICKNESS + 0.35);
-    const northCornice = new THREE.Mesh(northCorniceGeo, trimStoneMat);
-    northCornice.position.set(0, WALL_HEIGHT + 0.175, -PLATFORM_HALF - WALL_THICKNESS / 2);
-    proceduralWallGroup.add(northCornice);
-
-    const jambColGeo = new THREE.CylinderGeometry(0.18, 0.22, 2.7, 24);
-    const jambL = new THREE.Mesh(jambColGeo, trimStoneMat);
-    jambL.position.set(-0.95, 1.35, -PLATFORM_HALF + 0.08);
-    const jambR = new THREE.Mesh(jambColGeo, trimStoneMat);
-    jambR.position.set(0.95, 1.35, -PLATFORM_HALF + 0.08);
-    proceduralWallGroup.add(jambL);
-    proceduralWallGroup.add(jambR);
-
-    const archShape = new THREE.Shape();
-    const outerR = 1.15;
-    const innerR = 0.95;
-    archShape.absarc(0, 0, outerR, 0, Math.PI, false);
-    archShape.lineTo(-innerR, 0);
-    archShape.absarc(0, 0, innerR, Math.PI, 0, true);
-    archShape.lineTo(outerR, 0);
-
-    const extrudeSettings = {
-      depth: 0.22,
-      bevelEnabled: true,
-      bevelSegments: 4,
-      steps: 1,
-      bevelSize: 0.04,
-      bevelThickness: 0.04
-    };
-    const archGeo = new THREE.ExtrudeGeometry(archShape, extrudeSettings);
-    const archMesh = new THREE.Mesh(archGeo, trimStoneMat);
-    archMesh.position.set(0, 2.7, -PLATFORM_HALF + 0.02);
-    proceduralWallGroup.add(archMesh);
-
-    const keystoneGeo = new THREE.BoxGeometry(0.32, 0.42, 0.28);
-    const keystone = new THREE.Mesh(keystoneGeo, trimStoneMat);
-    keystone.position.set(0, 3.82, -PLATFORM_HALF + 0.12);
-    proceduralWallGroup.add(keystone);
-
-    const doorCanvas = createStylizedDoorCanvas();
-    const doorTexture = new THREE.CanvasTexture(doorCanvas);
-    doorTexture.colorSpace = THREE.SRGBColorSpace;
-    const doorMat = new THREE.MeshLambertMaterial({ map: doorTexture });
-
-    const doorShape = new THREE.Shape();
-    doorShape.moveTo(-0.92, 0);
-    doorShape.lineTo(-0.92, 2.65);
-    doorShape.absarc(0, 2.65, 0.92, Math.PI, 0, true);
-    doorShape.lineTo(0.92, 0);
-    doorShape.closePath();
-
-    const doorGeo = new THREE.ShapeGeometry(doorShape, 32);
-    const posAttr = doorGeo.attributes.position;
-    const uvs = new Float32Array(posAttr.count * 2);
-    for (let i = 0; i < posAttr.count; i++) {
-      const u = (posAttr.getX(i) + 0.92) / 1.84;
-      const v = posAttr.getY(i) / 3.57;
-      uvs[i * 2] = u;
-      uvs[i * 2 + 1] = v;
-    }
-    doorGeo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-
-    const doorMesh = new THREE.Mesh(doorGeo, doorMat);
-    doorMesh.position.set(0, 0, -PLATFORM_HALF + 0.02);
-    proceduralWallGroup.add(doorMesh);
-
-    const ringGeo = new THREE.TorusGeometry(0.12, 0.025, 16, 24);
-    const ringMat = new THREE.MeshLambertMaterial({ color: 0x475569 });
-    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-    ringMesh.position.set(-0.35, 1.35, -PLATFORM_HALF + 0.08);
-    proceduralWallGroup.add(ringMesh);
-
-    // East Wall
-    const eastWallGeo = new THREE.BoxGeometry(WALL_THICKNESS, WALL_HEIGHT, PLATFORM_HALF * 2 + WALL_THICKNESS);
-    const eastWall = new THREE.Mesh(eastWallGeo, wallMat);
-    eastWall.position.set(PLATFORM_HALF + WALL_THICKNESS / 2, WALL_HEIGHT / 2, -WALL_THICKNESS / 2);
-    proceduralWallGroup.add(eastWall);
-
-    const eastBaseboardGeo = new THREE.BoxGeometry(0.18, 0.28, PLATFORM_HALF * 2 + 0.1);
-    const eastBaseboard = new THREE.Mesh(eastBaseboardGeo, trimStoneMat);
-    eastBaseboard.position.set(PLATFORM_HALF - 0.09, 0.14, 0);
-    proceduralWallGroup.add(eastBaseboard);
-
-    const eastCorniceGeo = new THREE.BoxGeometry(WALL_THICKNESS + 0.35, 0.35, PLATFORM_HALF * 2 + WALL_THICKNESS + 0.35);
-    const eastCornice = new THREE.Mesh(eastCorniceGeo, trimStoneMat);
-    eastCornice.position.set(PLATFORM_HALF + WALL_THICKNESS / 2, WALL_HEIGHT + 0.175, -WALL_THICKNESS / 2);
-    proceduralWallGroup.add(eastCornice);
-
-    const pilasterGeo = new THREE.CylinderGeometry(0.24, 0.28, WALL_HEIGHT, 24);
-    const pilaster = new THREE.Mesh(pilasterGeo, trimStoneMat);
-    pilaster.position.set(PLATFORM_HALF - 0.14, WALL_HEIGHT / 2, 0);
-    proceduralWallGroup.add(pilaster);
-
-    const capGeo = new THREE.CylinderGeometry(0.34, 0.26, 0.32, 24);
-    const pilasterCap = new THREE.Mesh(capGeo, trimStoneMat);
-    pilasterCap.position.set(PLATFORM_HALF - 0.14, WALL_HEIGHT - 0.16, 0);
-    proceduralWallGroup.add(pilasterCap);
-
-    const sconceArmCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(PLATFORM_HALF - 0.02, 2.1, 0),
-      new THREE.Vector3(PLATFORM_HALF - 0.28, 2.15, 0),
-      new THREE.Vector3(PLATFORM_HALF - 0.38, 2.35, 0)
-    ]);
-    const sconceTubeGeo = new THREE.TubeGeometry(sconceArmCurve, 16, 0.035, 12, false);
-    const sconceMat = new THREE.MeshLambertMaterial({ color: 0x334155 });
-    const sconceArm = new THREE.Mesh(sconceTubeGeo, sconceMat);
-    proceduralWallGroup.add(sconceArm);
-
-    const brazierGeo = new THREE.ConeGeometry(0.14, 0.18, 16, 1, true);
-    const brazier = new THREE.Mesh(brazierGeo, sconceMat);
-    brazier.position.set(PLATFORM_HALF - 0.38, 2.44, 0);
-    proceduralWallGroup.add(brazier);
-
-    const flameGeo = new THREE.OctahedronGeometry(0.14, 2);
-    const flameMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b });
-    const flameMesh = new THREE.Mesh(flameGeo, flameMat);
-    flameMesh.position.set(PLATFORM_HALF - 0.38, 2.58, 0);
-    proceduralWallGroup.add(flameMesh);
-
-    const torchLight = new THREE.PointLight(0xf59e0b, 1.2, 7.5);
-    torchLight.position.set(PLATFORM_HALF - 0.45, 2.65, 0);
-    proceduralWallGroup.add(torchLight);
-
-    const cornerColGeo = new THREE.CylinderGeometry(0.42, 0.46, WALL_HEIGHT + 0.35, 24);
-    const cornerCol = new THREE.Mesh(cornerColGeo, trimStoneMat);
-    cornerCol.position.set(PLATFORM_HALF + WALL_THICKNESS / 2, (WALL_HEIGHT + 0.35) / 2, -PLATFORM_HALF - WALL_THICKNESS / 2);
-    proceduralWallGroup.add(cornerCol);
-
-    scene.add(proceduralWallGroup);
-    proceduralWallGroupRef.current = proceduralWallGroup;
 
     // Check IndexedDB for previously stored custom Character GLB
     const initCharacter = async () => {
@@ -2269,6 +2738,81 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       } catch (err) {
         console.warn("Failed to restore custom door:", err);
       }
+
+      // 4. Restore chunk library and all previously placed grid copies
+      try {
+        const [storedLibrary, storedPlaced, storedSections] = await Promise.all([
+          getItem<ChunkLibraryEntry[]>(CHUNK_LIBRARY_KEY),
+          getItem<PlacedChunkInstance[]>(CHUNK_PLACEMENTS_KEY),
+          getItem<SectionInfo[]>(CHUNK_SECTIONS_KEY)
+        ]);
+
+        // Custom sections (the root section always exists)
+        if (Array.isArray(storedSections)) {
+          const merged = [
+            { id: 'root', name: 'Abschnitt 1' },
+            ...storedSections.filter(s => s.id !== 'root')
+          ];
+          setSections(merged);
+          sectionsRef.current = merged;
+        }
+
+        if (Array.isArray(storedLibrary) && storedLibrary.length > 0) {
+          chunkLibraryRef.current = storedLibrary;
+          setChunkLibrary(storedLibrary);
+        }
+
+        if (Array.isArray(storedPlaced) && storedPlaced.length > 0) {
+          for (const inst of storedPlaced) {
+            const entry = storedLibrary?.find(e => e.id === inst.libraryId);
+            if (!entry) continue;
+            const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+            await new Promise<void>((resolve) => {
+              new GLTFLoader().parse(buffer, '', (gltf) => {
+                placeChunkInstance(inst, gltf.scene);
+                resolve();
+              }, () => resolve());
+            });
+          }
+          placedChunksRef.current = storedPlaced;
+          setPlacedChunks(storedPlaced);
+          // Rebuild the walkable grid including all restored floor copies
+          refreshWalkableTilesRef.current?.({ baseFloor: true, section: 'root' });
+        }
+      } catch (err) {
+        console.warn('Failed to restore placed chunks:', err);
+      }
+
+      // 5. Restore the NPC/enemy library and all placed characters
+      try {
+        const [storedNpcLibrary, storedNpcPlaced] = await Promise.all([
+          getItem<NpcLibraryEntry[]>(NPC_LIBRARY_KEY),
+          getItem<PlacedNpcInstance[]>(NPC_PLACEMENTS_KEY)
+        ]);
+
+        if (Array.isArray(storedNpcLibrary) && storedNpcLibrary.length > 0) {
+          npcLibraryRef.current = storedNpcLibrary;
+          setNpcLibrary(storedNpcLibrary);
+        }
+
+        if (Array.isArray(storedNpcPlaced) && storedNpcPlaced.length > 0) {
+          for (const inst of storedNpcPlaced) {
+            const entry = storedNpcLibrary?.find(e => e.id === inst.libraryId);
+            if (!entry) continue;
+            const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+            await new Promise<void>((resolve) => {
+              new GLTFLoader().parse(buffer, '', (gltf) => {
+                mountNpcInstance(inst, { scene: gltf.scene, animations: gltf.animations || [] });
+                resolve();
+              }, () => resolve());
+            });
+          }
+          placedNpcsRef.current = storedNpcPlaced;
+          setPlacedNpcs(storedNpcPlaced);
+        }
+      } catch (err) {
+        console.warn('Failed to restore placed characters:', err);
+      }
     };
 
     initCharacter();
@@ -2278,7 +2822,832 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
+    // -----------------------------------------------------------------------
+    // Placement Mode logic (ghost preview, grid snapping, occupancy check)
+    // -----------------------------------------------------------------------
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.25);
+    const rayHitVec = new THREE.Vector3();
+    let lastGhostCell: { x: number; z: number } | null = null;
+    let lastGhostValid = false;
+
+    const getPickPlaneY = () => (customFloorLoadedRef.current ? 0.25 + floorOffsetYRef.current : 0.05);
+
+    // Orientation of a barrier (wall/door) in mod-180: 0/180 -> lane 0, 90/270 -> lane 90
+    const orientOf = (rotY: number): number => ((Math.round(rotY) % 180) + 180) % 180;
+
+    // Section of a placement ('root' when unset)
+    const sectOf = (p: PlacedChunkInstance): string => p.sectionId ?? 'root';
+
+    // Lanes of one barrier type per cell within the ACTIVE section: walls never
+    // block doors and vice versa (doors overlap walls). Only same-type
+    // same-lane conflicts.
+    const isBarrierLaneFree = (t: 'wall' | 'door', lane: 0 | 90, cx: number, cz: number): boolean => {
+      const empty = placedChunksRef.current.every(
+        p => !(p.type === t && sectOf(p) === activeSectionRef.current && p.cellX === cx && p.cellZ === cz && orientOf(p.rotationY) === lane)
+      );
+      if (!empty) return false;
+      // Base chunk instances at origin block their lane for the same type
+      if (activeSectionRef.current === 'root' && cx === 0 && cz === 0) {
+        if (t === 'wall') {
+          if (lane === 0 && baseWallFlagsRef.current.left) return false;
+          if (lane === 90 && baseWallFlagsRef.current.upper) return false;
+        } else {
+          if (lane === 0 && baseDoorFlagsRef.current.left) return false;
+          if (lane === 90 && baseDoorFlagsRef.current.upper) return false;
+        }
+      }
+      return true;
+    };
+
+    // Floors: one per cell (per section). Walls/doors: free when no same-type
+    // chunk of the active section uses the lane
+    const isCellOccupied = (t: ChunkType, cx: number, cz: number, rotY: number): boolean => {
+      if (t === 'floor') {
+        if (placedChunksRef.current.some(p => p.type === 'floor' && sectOf(p) === activeSectionRef.current && p.cellX === cx && p.cellZ === cz)) return true;
+        if (activeSectionRef.current === 'root' && cx === 0 && cz === 0) return customFloorLoadedRef.current;
+        return false;
+      }
+      return !isBarrierLaneFree(t, orientOf(rotY) as 0 | 90, cx, cz);
+    };
+
+    // free cells are only valid if adjacent (8-way) to any chunk of the same section
+    const hasNeighborChunk = (cx: number, cz: number): boolean => {
+      for (const p of placedChunksRef.current) {
+        if (sectOf(p) !== activeSectionRef.current) continue;
+        if (Math.abs(p.cellX - cx) <= 1 && Math.abs(p.cellZ - cz) <= 1) return true;
+      }
+      return activeSectionRef.current === 'root' && hasBaseAnchor() && Math.abs(cx) <= 1 && Math.abs(cz) <= 1;
+    };
+
+    // Any base chunk at origin anchors the building grid
+    const hasBaseAnchor = (): boolean =>
+      customFloorLoadedRef.current ||
+      baseWallFlagsRef.current.left || baseWallFlagsRef.current.upper ||
+      baseDoorFlagsRef.current.left || baseDoorFlagsRef.current.upper;
+
+    // One character per walkable sub-tile of the active section; the player
+    // character itself also blocks its tile
+    const isNpcCellFree = (col: number, row: number): boolean => {
+      if (!walkableKeysRef.current.has(`${col},${row}`)) return false;
+      if (placedNpcsRef.current.some(n => (n.sectionId ?? 'root') === activeSectionRef.current && n.col === col && n.row === row)) return false;
+      const pt = currentTileRef.current;
+      if (pt && pt.col === col && pt.row === row) return false;
+      return true;
+    };
+
+    const canPlaceAt = (t: PlacementType, cx: number, cz: number, rotY: number): boolean => {
+      if (t === 'npc' || t === 'enemy') return isNpcCellFree(cx, cz);
+      const sectionEmpty = !placedChunksRef.current.some(p => sectOf(p) === activeSectionRef.current);
+      const noAnchor = activeSectionRef.current !== 'root' || !hasBaseAnchor();
+      return !isCellOccupied(t, cx, cz, rotY) &&
+        ((sectionEmpty && noAnchor) || hasNeighborChunk(cx, cz));
+    };
+
+    // -----------------------------------------------------------------------
+    // Walkable dungeon tiles: every floor chunk (base + copies of the active
+    // section) builds a 3x3 sub-tile grid the character can move on.
+    // -----------------------------------------------------------------------
+    const refreshWalkableTiles = (opts?: { baseFloor?: boolean; section?: string }) => {
+      const section = opts?.section ?? activeSectionRef.current;
+      const baseActive = opts?.baseFloor ?? customFloorLoadedRef.current;
+      const keys = new Set<string>();
+      // The base chunks (floor/wall/door) permanently belong to the root section
+      if (section === 'root' && baseActive) {
+        for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) keys.add(`${i},${j}`);
+      }
+      for (const p of placedChunksRef.current) {
+        if (p.type !== 'floor') continue;
+        if ((p.sectionId ?? 'root') !== section) continue;
+        for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) keys.add(`${p.cellX * 3 + i},${p.cellZ * 3 + j}`);
+      }
+      // The character always has a home tile, even with no chunks built yet
+      if (keys.size === 0) keys.add('0,0');
+
+      walkableKeysRef.current = keys;
+
+      const tSize = BLENDER_TILE_SIZE;
+      const sY = baseActive ? (0.25 + floorOffsetYRef.current) : 0.05;
+
+      for (const oldMesh of tileMeshesRef.current) {
+        oldMesh.geometry.dispose();
+        tilesGroup.remove(oldMesh);
+      }
+      tileMeshesRef.current = [];
+      for (const key of keys) {
+        const [c, r] = key.split(',').map(Number);
+        const tMesh = new THREE.Mesh(new THREE.PlaneGeometry(tSize - 0.06, tSize - 0.06), tileMeshMat);
+        tMesh.rotation.x = -Math.PI / 2;
+        tMesh.position.set(c * tSize, sY + 0.015, r * tSize);
+        tMesh.userData = { col: c, row: r };
+        tilesGroup.add(tMesh);
+        tileMeshesRef.current.push(tMesh);
+      }
+    };
+    refreshWalkableTilesRef.current = refreshWalkableTiles;
+    refreshWalkableTiles();
+
+    // Repaint ghost colors for the currently snapped cell (after rotation or placement)
+    const repaintGhost = () => {
+      const placement = placementSceneRef.current;
+      if (!placement || !lastGhostCell) return;
+      lastGhostValid = canPlaceAt(placement.type, lastGhostCell.x, lastGhostCell.z, ghostRotationRef.current);
+      const ghostColor = lastGhostValid ? 0x38bdf8 : 0xef4444;
+      ghostMat.color.setHex(ghostColor);
+      ghostFootprintMat.color.setHex(ghostColor);
+      ghostBorderMat.color.setHex(ghostColor);
+    };
+
+    // Mount one placed chunk copy at its grid cell
+    const placeChunkInstance = (inst: PlacedChunkInstance, gltfScene: THREE.Group) => {
+      const holder = new THREE.Group();
+      holder.name = `Placed_${inst.type}_${inst.id}`;
+      const model = gltfScene.clone(true);
+      prepareChunkModel(model);
+      holder.add(model);
+      holder.position.set(inst.cellX * CHUNK_CELL, 0, inst.cellZ * CHUNK_CELL);
+      holder.rotation.y = (inst.rotationY * Math.PI) / 180;
+      holder.userData = { instanceId: inst.id, libraryId: inst.libraryId, type: inst.type, sectionId: inst.sectionId ?? 'root' };
+      // Chunks of non-active dungeon sections stay loaded but hidden
+      holder.visible = (inst.sectionId ?? 'root') === activeSectionRef.current;
+      placedChunksGroup.add(holder);
+      return holder;
+    };
+
+    // Remove scene children whose instance id is no longer in the list
+    const syncPlacedGroup = (list: PlacedChunkInstance[]) => {
+      const keep = new Set(list.map(i => i.id));
+      for (let i = placedChunksGroup.children.length - 1; i >= 0; i--) {
+        const child = placedChunksGroup.children[i] as THREE.Group;
+        if (!keep.has(child.userData?.instanceId)) {
+          placedChunksGroup.remove(child);
+        }
+      }
+    };
+    syncPlacedGroupRef.current = syncPlacedGroup;
+
+    // -----------------------------------------------------------------------
+    // Placed NPC & enemy characters (idle figures on walkable sub-tiles)
+    // -----------------------------------------------------------------------
+
+    // Mount one NPC/enemy GLB on a sub-tile of the dungeon (idle animation)
+    const mountNpcInstance = (inst: PlacedNpcInstance, gltf: { scene: THREE.Group; animations: THREE.AnimationClip[] }) => {
+      const holder = new THREE.Group();
+      holder.name = `PlacedNpc_${inst.id}`;
+      // Clone via SkeletonUtils: AnimationMixer works on skinned clones too
+      const model = cloneSkeleton(gltf.scene) as THREE.Group;
+      // Same material fix-up as the player character
+      model.traverse((child: any) => {
+        if (child.isMesh) {
+          child.castShadow = false;
+          child.receiveShadow = false;
+          child.frustumCulled = false;
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach((m: any) => {
+            if (m) {
+              if ('roughness' in m) m.roughness = 0.85;
+              if ('metalness' in m) m.metalness = 0.05;
+              if (m.map) {
+                m.map.colorSpace = THREE.SRGBColorSpace;
+                m.map.needsUpdate = true;
+              }
+            }
+          });
+        }
+      });
+      // Bottom-center pivot + approx. player height (1.85m), like the dummy
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const baseScale = size.y > 0.001 ? 1.85 / size.y : 1.0;
+      model.position.set(-center.x, -box.min.y, -center.z);
+      const inner = new THREE.Group();
+      inner.name = 'NpcInnerAdjuster';
+      inner.add(model);
+      inner.scale.setScalar(baseScale);
+      holder.add(inner);
+
+      const surfaceY = getPickPlaneY();
+      holder.position.set(inst.col * BLENDER_TILE_SIZE, 0, inst.row * BLENDER_TILE_SIZE);
+
+      // Small grounded shadow disc (same style as the player character)
+      const shadowMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.8, 0.8),
+        new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.4, depthWrite: false })
+      );
+      shadowMesh.rotation.x = -Math.PI / 2;
+      shadowMesh.position.y = surfaceY + 0.02;
+      holder.add(shadowMesh);
+      // Lift the model to the floor surface height
+      inner.position.y = surfaceY;
+
+      holder.rotation.y = (inst.rotationY * Math.PI) / 180;
+      holder.visible = (inst.sectionId ?? 'root') === activeSectionRef.current;
+      holder.userData = {
+        npcId: inst.id,
+        libraryId: inst.libraryId,
+        npcKind: inst.kind,
+        sectionId: inst.sectionId ?? 'root'
+      };
+      placedNpcsGroup.add(holder);
+
+      // Start the idle animation of this character
+      const idleClip = gltf.animations.find(c => /idle|stand|wait|pose/i.test(c.name)) || gltf.animations[0];
+      if (idleClip) {
+        const mixer = new THREE.AnimationMixer(model);
+        mixer.clipAction(idleClip).play();
+        npcMixersRef.current = [
+          ...npcMixersRef.current.filter(x => x.id !== inst.id),
+          { id: inst.id, mixer }
+        ];
+      }
+      return holder;
+    };
+
+    // Remove scene children whose npc id is no longer in the list
+    const syncNpcGroup = (list: PlacedNpcInstance[]) => {
+      const keep = new Set(list.map(i => i.id));
+      for (let i = placedNpcsGroup.children.length - 1; i >= 0; i--) {
+        const child = placedNpcsGroup.children[i] as THREE.Group;
+        if (!keep.has(child.userData?.npcId)) {
+          placedNpcsGroup.remove(child);
+        }
+      }
+      // Stop updating mixers of removed instances
+      npcMixersRef.current = npcMixersRef.current.filter(x => keep.has(x.id));
+    };
+    syncNpcGroupRef.current = syncNpcGroup;
+
+    // Delete one placed character immediately (used by the Remove mode)
+    const deletePlacedNpc = (inst: PlacedNpcInstance) => {
+      const next = placedNpcsRef.current.filter(p => p.id !== inst.id);
+      placedNpcsRef.current = next;
+      setPlacedNpcs(next);
+      syncNpcGroup(next);
+      setItem(NPC_PLACEMENTS_KEY, next).catch(err => console.warn('npc placement save failed:', err));
+      playTactileSfx('click');
+    };
+
+    // Raycast against placed characters, resolves the owning instance
+    const findPlacedNpcAtEvent = (e: MouseEvent): { inst: PlacedNpcInstance } | null => {
+      if (placedNpcsRef.current.length === 0) return null;
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObjects(placedNpcsGroup.children, true);
+      for (const h of hits) {
+        let obj: THREE.Object3D | null = h.object;
+        while (obj && !obj.userData?.npcId) obj = obj.parent;
+        if (!obj) continue;
+        const inst = placedNpcsRef.current.find(p => p.id === obj!.userData.npcId);
+        if (inst) return { inst };
+      }
+      return null;
+    };
+
+    // -----------------------------------------------------------------------
+    // Edit modes for placed chunks: pick up & move, or delete
+    // -----------------------------------------------------------------------
+    let moveSession: { inst: PlacedChunkInstance; gltfScene: THREE.Group } | null = null;
+    // Carried placed character (same pattern as the chunk move session)
+    let npcMoveSession: { inst: PlacedNpcInstance; gltfScene: THREE.Group; animations: THREE.AnimationClip[] } | null = null;
+
+    // Puts a carried chunk back on its original cell (aborted move)
+    const restoreMoveSession = () => {
+      const src = moveSession;
+      if (!src) return;
+      moveSession = null;
+      placeChunkInstance(src.inst, src.gltfScene);
+      const back = [...placedChunksRef.current, src.inst];
+      placedChunksRef.current = back;
+      setPlacedChunks(back);
+      if (src.inst.type === 'floor') refreshWalkableTiles();
+    };
+
+    // Puts a carried character back on its original tile (aborted move)
+    const restoreNpcMoveSession = () => {
+      const src = npcMoveSession;
+      if (!src) return;
+      npcMoveSession = null;
+      mountNpcInstance(src.inst, { scene: src.gltfScene, animations: src.animations });
+      const back = [...placedNpcsRef.current, src.inst];
+      placedNpcsRef.current = back;
+      setPlacedNpcs(back);
+    };
+
+    // Shared restore for every abort path (chunks AND characters)
+    const restoreActiveMove = () => {
+      restoreMoveSession();
+      restoreNpcMoveSession();
+    };
+    restoreMoveRef.current = restoreActiveMove;
+
+    // Raycast against placed chunk copies, resolves the owning instance
+    const findPlacedChunkAtEvent = (e: MouseEvent): { inst: PlacedChunkInstance } | null => {
+      if (placedChunksRef.current.length === 0) return null;
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObjects(placedChunksGroup.children, true);
+      for (const h of hits) {
+        let obj: THREE.Object3D | null = h.object;
+        while (obj && !obj.userData?.instanceId) obj = obj.parent;
+        if (!obj) continue;
+        const inst = placedChunksRef.current.find(p => p.id === obj!.userData.instanceId);
+        if (inst) return { inst };
+      }
+      return null;
+    };
+
+    // Delete one placed chunk copy immediately
+    const deletePlacedChunk = (inst: PlacedChunkInstance) => {
+      // Free the partner of a linked portal door
+      if (inst.portalId) {
+        const partner = placedChunksRef.current.find(p => p.id === inst.portalId);
+        if (partner) {
+          partner.portalId = undefined;
+          partner.pairColorIndex = undefined;
+        }
+      }
+      const next = placedChunksRef.current.filter(p => p.id !== inst.id);
+      placedChunksRef.current = next;
+      setPlacedChunks(next);
+      syncPlacedGroup(next);
+      setItem(CHUNK_PLACEMENTS_KEY, next).catch(err => console.warn('placement save failed:', err));
+      if (inst.type === 'floor') refreshWalkableTiles();
+      refreshLinkHighlightsRef.current?.();
+      playTactileSfx('click');
+    };
+
+    // Pick a placed chunk up: it follows the cursor as ghost until the next
+    // click commits the new position. ESC / Right click restores the original.
+    const startMoveSession = (inst: PlacedChunkInstance) => {
+      const entry = chunkLibraryRef.current.find(el => el.id === inst.libraryId);
+      if (!entry) return;
+      setIsLoadingModel(true);
+      setLoadingMessage(`Chunk wird aufgenommen: "${entry.fileName}"...`);
+      try {
+        const requestToken = ++placementRequestSeqRef.current;
+        const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+        new GLTFLoader().parse(buffer, '', (gltf) => {
+          // The user switched to something else while the file was parsing
+          if (requestToken !== placementRequestSeqRef.current) {
+            setIsLoadingModel(false);
+            return;
+          }
+          setIsLoadingModel(false);
+          restoreActiveMove(); // safety: never carry two things at once
+          moveSession = { inst, gltfScene: gltf.scene };
+          const next = placedChunksRef.current.filter(p => p.id !== inst.id);
+          placedChunksRef.current = next;
+          setPlacedChunks(next);
+          syncPlacedGroup(next);
+          // Removed floor extends/shortens the walkable grid at once
+          if (inst.type === 'floor') refreshWalkableTiles();
+          ghostRotationRef.current = inst.rotationY;
+          placementSceneRef.current = { type: inst.type, libId: entry.id, gltfScene: gltf.scene };
+          setPlacementMode({
+            type: inst.type,
+            libId: entry.id,
+            fileName: entry.fileName,
+            rotationY: inst.rotationY,
+            moveInstanceId: inst.id
+          });
+          applyGhostRef.current?.();
+          playTactileSfx('success');
+        }, () => {
+          console.error('Chunk GLTF parse error (move)');
+          setIsLoadingModel(false);
+        });
+      } catch (err: any) {
+        console.error('Chunk file read error (move):', err);
+        setIsLoadingModel(false);
+      }
+    };
+
+    // Pick a placed character up: it follows the cursor as ghost until the next
+    // click commits the new tile. ESC / Right click restores the original tile.
+    const startNpcMoveSession = (inst: PlacedNpcInstance) => {
+      const entry = npcLibraryRef.current.find(el => el.id === inst.libraryId);
+      if (!entry) return;
+      setIsLoadingModel(true);
+      setLoadingMessage(`Figur wird aufgenommen: "${entry.fileName}"...`);
+      try {
+        const requestToken = ++placementRequestSeqRef.current;
+        const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+        new GLTFLoader().parse(buffer, '', (gltf) => {
+          // The user switched to something else while the file was parsing
+          if (requestToken !== placementRequestSeqRef.current) {
+            setIsLoadingModel(false);
+            return;
+          }
+          setIsLoadingModel(false);
+          restoreActiveMove(); // safety: never carry two things at once
+          npcMoveSession = { inst, gltfScene: gltf.scene, animations: gltf.animations || [] };
+          const next = placedNpcsRef.current.filter(p => p.id !== inst.id);
+          placedNpcsRef.current = next;
+          setPlacedNpcs(next);
+          syncNpcGroup(next);
+          ghostRotationRef.current = inst.rotationY;
+          placementSceneRef.current = {
+            type: inst.kind,
+            libId: entry.id,
+            gltfScene: gltf.scene,
+            animations: gltf.animations || [],
+            moveNpcId: inst.id
+          };
+          setPlacementMode({
+            type: inst.kind,
+            libId: entry.id,
+            fileName: entry.fileName,
+            rotationY: inst.rotationY,
+            moveNpcId: inst.id
+          });
+          applyGhostRef.current?.();
+          playTactileSfx('success');
+        }, () => {
+          console.error('Character GLTF parse error (move)');
+          setIsLoadingModel(false);
+        });
+      } catch (err: any) {
+        console.error('Character file read error (move):', err);
+        setIsLoadingModel(false);
+      }
+    };
+
+    // -----------------------------------------------------------------------
+    // Dungeon sections
+    // -----------------------------------------------------------------------
+
+    // Only chunks (and characters) of one section are visible at any time
+    const applySectionVisibility = (sectionId: string) => {
+      placedChunksGroup.children.forEach(child => {
+        const childSect = (child.userData?.sectionId as string) ?? 'root';
+        child.visible = childSect === sectionId;
+      });
+      placedNpcsGroup.children.forEach(child => {
+        const childSect = (child.userData?.sectionId as string) ?? 'root';
+        child.visible = childSect === sectionId;
+      });
+      // Base chunks permanently belong to the root section
+      if (customFloorGroupRef.current) customFloorGroupRef.current.visible = sectionId === 'root';
+      if (customWallGroupRef.current) customWallGroupRef.current.visible = sectionId === 'root';
+      if (customDoorGroupRef.current) customDoorGroupRef.current.visible = sectionId === 'root';
+    };
+
+    // Recentre the camera on a world position (keeps iso angle + zoom)
+    const refocusCamera = (worldPos: THREE.Vector3) => {
+      const delta = new THREE.Vector3(worldPos.x - camTarget.x, 0, worldPos.z - camTarget.z);
+      camera.position.add(delta);
+      camTarget.set(worldPos.x, 0.45, worldPos.z);
+      camera.lookAt(camTarget);
+    };
+
+    // Instantly place the character on a tile and turn away from an optional door
+    const teleportCharacterTo = (col: number, row: number, facingAngle: number | null) => {
+      moveQueueRef.current = [];
+      targetWorldPosRef.current = null;
+      currentTileRef.current = { col, row };
+      setCharacterCoord({ col, row });
+      const pos = getTileWorldPos(col, row);
+      characterPosRef.current.set(pos.x, pos.y, pos.z);
+      if (characterRootRef.current) {
+        characterRootRef.current.position.set(pos.x, pos.y, pos.z);
+        if (facingAngle !== null) {
+          targetFacingAngleRef.current = facingAngle;
+          currentFacingAngleRef.current = facingAngle;
+          characterRootRef.current.rotation.y = facingAngle;
+        }
+      }
+      setFacingDir(facingAngle === 0 ? 'SOUTH' : facingAngle === Math.PI ? 'NORTH' : facingAngle === Math.PI / 2 ? 'EAST' : 'WEST');
+      setAnimState('IDLE');
+      updateMovementAnimationRef.current(false);
+      pendingPortalTileRef.current = null;
+    };
+
+    // Switch to a section: visibility, walkable tiles, character position/camera
+    const focusSection = (sectionId: string, door?: PlacedChunkInstance) => {
+      activeSectionRef.current = sectionId;
+      setActiveSection(sectionId);
+      applySectionVisibility(sectionId);
+      refreshWalkableTiles({ section: sectionId });
+
+      if (door) {
+        // Section entered through a door: spawn in front of it, back towards it
+        const tile = doorApproachTile(door);
+        if (!walkableKeysRef.current.has(`${tile.col},${tile.row}`)) {
+          // Floor chunk missing behind the door: fall back to any section tile
+          const fallback = [...walkableKeysRef.current][0];
+          const [fc, fr] = fallback.split(',').map(Number);
+          teleportCharacterTo(fc, fr, null);
+        } else {
+          teleportCharacterTo(tile.col, tile.row, doorBackFacingAngle(door));
+        }
+      } else {
+        // Manual switch (dropdown): keep the character when its tile is
+        // walkable in the new section, otherwise move to the nearest tile
+        const t = currentTileRef.current;
+        if (!walkableKeysRef.current.has(`${t.col},${t.row}`)) {
+          let best: { col: number; row: number } | null = null;
+          let bestDist = Infinity;
+          for (const key of walkableKeysRef.current) {
+            const [c, r] = key.split(',').map(Number);
+            const d = Math.abs(c - t.col) + Math.abs(r - t.row);
+            if (d < bestDist) { bestDist = d; best = { col: c, row: r }; }
+          }
+          if (best) teleportCharacterTo(best.col, best.row, null);
+        }
+      }
+      refocusCamera(characterPosRef.current);
+      // While linking doors the pick must survive section switching
+      if (editModeRef.current !== 'link') setLinkPickName(null);
+      // Marker shells must follow the freshly visible section
+      refreshLinkHighlightsRef.current?.();
+    };
+    focusSectionRef.current = focusSection;
+    focusSection('root');
+
+    // Human-readable door label (door file names are all identical, ids are not)
+    const doorLabelOf = (inst: PlacedChunkInstance): string => {
+      const doors = placedChunksRef.current.filter(p => p.type === 'door');
+      const i = doors.findIndex(p => p.id === inst.id);
+      return `Tür #${i + 1}`;
+    };
+
+    // Door pair colors: one color per PAIR, both doors share it
+    const DOOR_PAIR_COLORS = [
+      0x22d3ee, 0xfb7185, 0x4ade80, 0xfacc15, 0xa78bfa, 0x38bdf8,
+      0xfb923c, 0x34d399, 0xe879f9, 0xf87171, 0x2dd4bf, 0x818cf8
+    ];
+    const DOOR_PICK_COLOR = 0xfbbf24; // amber: door currently picked for linking
+
+    // Transparent marker boxes hugging each door chunk's REAL geometry
+    // (works with any pivot convention). Only doors of the visible section.
+    const refreshLinkHighlights = () => {
+      for (const child of [...doorGlowGroup.children]) {
+        const m = child as THREE.Mesh;
+        m.geometry.dispose();
+        (m.material as THREE.Material).dispose();
+        doorGlowGroup.remove(m);
+      }
+      for (const p of placedChunksRef.current) {
+        if (p.type !== 'door') continue;
+        if (sectOf(p) !== activeSectionRef.current) continue; // no ghosts of hidden sections
+        const isPick = linkFirstPick.current?.id === p.id;
+        const paired = p.portalId !== undefined && placedChunksRef.current.some(q => q.id === p.portalId);
+        if (!isPick && !paired) continue;
+        const color = isPick
+          ? DOOR_PICK_COLOR
+          : DOOR_PAIR_COLORS[(p.pairColorIndex ?? 0) % DOOR_PAIR_COLORS.length];
+        const holder = placedChunksGroup.children.find(c => (c.userData?.instanceId as string) === p.id);
+        if (!holder) continue;
+        holder.updateWorldMatrix(true, true);
+        const box = new THREE.Box3().setFromObject(holder);
+        const size = new THREE.Vector3();
+        const center = new THREE.Vector3();
+        box.getSize(size);
+        box.getCenter(center);
+        if (size.lengthSq() < 1e-6) continue;
+        const pad = 0.22;
+        const geo = new THREE.BoxGeometry(
+          Math.max(size.x, 0.4) + pad,
+          Math.max(size.y, 0.4) + pad,
+          Math.max(size.z, 0.4) + pad
+        );
+        const mat = new THREE.MeshBasicMaterial({
+          color, transparent: true, opacity: isPick ? 0.42 : 0.3, depthWrite: false
+        });
+        const marker = new THREE.Mesh(geo, mat);
+        marker.position.copy(center);
+        marker.renderOrder = 5;
+        doorGlowGroup.add(marker);
+      }
+    };
+
+    // Pair two doors as a section portal (bidirectional link, shared color)
+    const linkFirstPick = { current: null as PlacedChunkInstance | null };
+    const pairDoors = (a: PlacedChunkInstance, b: PlacedChunkInstance) => {
+      // Free the old partners of both doors (strict 1:1 pairing)
+      for (const p of placedChunksRef.current) {
+        if (p.id === a.id || p.id === b.id) continue;
+        if (p.portalId === a.portalId || p.portalId === b.portalId) {
+          p.portalId = undefined;
+          p.pairColorIndex = undefined;
+        }
+      }
+      // Smallest unused color index keeps colors stable across reloads
+      const used = new Set(
+        placedChunksRef.current.map(p => p.pairColorIndex).filter(v => v !== undefined) as number[]
+      );
+      let idx = 0;
+      while (used.has(idx)) idx++;
+      a.portalId = b.id;
+      b.portalId = a.id;
+      a.pairColorIndex = idx;
+      b.pairColorIndex = idx;
+      setItem(CHUNK_PLACEMENTS_KEY, [...placedChunksRef.current]).catch(err => console.warn('placement save failed:', err));
+      refreshLinkHighlights();
+      linkFirstPick.current = null;
+      setLinkPickName(null);
+      playTactileSfx('success');
+    };
+
+    // Unlink one pair (both directions); triggered from the confirm dialog
+    const unlinkDoor = (doorId: string) => {
+      const door = placedChunksRef.current.find(p => p.id === doorId);
+      if (!door?.portalId) return;
+      const partner = placedChunksRef.current.find(p => p.id === door.portalId);
+      if (partner) {
+        partner.portalId = undefined;
+        partner.pairColorIndex = undefined;
+      }
+      door.portalId = undefined;
+      door.pairColorIndex = undefined;
+      setItem(CHUNK_PLACEMENTS_KEY, [...placedChunksRef.current]).catch(err => console.warn('placement save failed:', err));
+      refreshLinkHighlights();
+      playTactileSfx('click');
+    };
+    unlinkDoorRef.current = unlinkDoor;
+
+    // Hook up the link-mode click handler (used by the pointerdown branch)
+    handleDoorLinkClickRef.current = (inst: PlacedChunkInstance) => {
+      if (inst.type !== 'door') return;
+      const picked = linkFirstPick.current;
+      if (!picked) {
+        if (inst.portalId) {
+          // Door already paired: ask the user before tearing it apart
+          askUnlinkRef.current(inst.id, doorLabelOf(inst));
+          playTactileSfx('hover');
+        } else {
+          linkFirstPick.current = inst;
+          setLinkPickName(doorLabelOf(inst));
+          refreshLinkHighlights();
+          playTactileSfx('hover');
+        }
+        return;
+      }
+      if (picked.id === inst.id) {
+        // Clicking the picked door again clears the selection
+        linkFirstPick.current = null;
+        setLinkPickName(null);
+        refreshLinkHighlights();
+        playTactileSfx('hover');
+        return;
+      }
+      pairDoors(picked, inst);
+    };
+    // Link mode stays on the ACTIVE section; the user switches sections via
+    // the dropdown while picking partners
+    handleLinkModeChangedRef.current = (active: boolean) => {
+      linkFirstPick.current = null;
+      setLinkPickName(null);
+      doorGlowGroup.visible = active;
+      if (active) refreshLinkHighlights();
+    };
+    refreshLinkHighlights();
+    refreshLinkHighlightsRef.current = refreshLinkHighlights;
+    // (Re)build the ghost model for the active placement session
+    const applyGhost = () => {
+      const placement = placementSceneRef.current;
+      if (!placement || !ghostModelHolder || !ghostGroupRef.current) return;
+      while (ghostModelHolder.children.length > 0) {
+        ghostModelHolder.remove(ghostModelHolder.children[0]);
+      }
+      // Skinned character ghosts need a SkeletonUtils clone: a plain clone
+      // keeps its skeleton bound to the ORIGINAL bones and would render at
+      // the bind pose world position instead of following the cursor
+      const isChar = placement.type === 'npc' || placement.type === 'enemy';
+      const model = isChar
+        ? (cloneSkeleton(placement.gltfScene) as THREE.Group)
+        : placement.gltfScene.clone(true);
+      model.traverse((child: any) => {
+        if (child.isMesh) {
+          child.castShadow = false;
+          child.receiveShadow = false;
+          child.frustumCulled = false;
+          child.material = ghostMat;
+        }
+      });
+      ghostModelHolder.add(model);
+      ghostModelHolder.rotation.y = (ghostRotationRef.current * Math.PI) / 180;
+      // Character ghosts show a single sub-tile footprint, chunks a full cell
+      const fs = isChar ? BLENDER_TILE_SIZE / CHUNK_CELL : 1;
+      ghostFootprint.scale.set(fs, fs, 1);
+      ghostBorder.scale.set(fs, fs, 1);
+      const pickY = getPickPlaneY();
+      ghostFootprint.position.y = pickY + 0.02;
+      ghostBorder.position.y = pickY + 0.025;
+      ghostGroupRef.current.visible = false;
+    };
+    applyGhostRef.current = applyGhost;
+
+    hideGhostRef.current = () => {
+      if (ghostGroupRef.current) ghostGroupRef.current.visible = false;
+    };
+
+    // Update ghost position/color from a pointer event. Returns true while
+    // Placement Mode is active (pointer handlers then skip tile navigation).
+    const updateGhostForEvent = (e: MouseEvent): boolean => {
+      const placement = placementSceneRef.current;
+      if (!placement || !ghostGroupRef.current) return false;
+
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+
+      groundPlane.constant = -getPickPlaneY();
+      if (!raycaster.ray.intersectPlane(groundPlane, rayHitVec)) {
+        ghostGroupRef.current.visible = false;
+        lastGhostCell = null;
+        lastGhostValid = false;
+        return true;
+      }
+
+      const tSize = BLENDER_TILE_SIZE;
+      const isChar = placement.type === 'npc' || placement.type === 'enemy';
+      const step = isChar ? tSize : CHUNK_CELL;
+      const cellX = Math.round(rayHitVec.x / step);
+      const cellZ = Math.round(rayHitVec.z / step);
+      lastGhostCell = { x: cellX, z: cellZ };
+      lastGhostValid = canPlaceAt(placement.type, cellX, cellZ, ghostRotationRef.current);
+
+      const ghostColor = lastGhostValid ? 0x38bdf8 : 0xef4444;
+      ghostMat.color.setHex(ghostColor);
+      ghostFootprintMat.color.setHex(ghostColor);
+      ghostBorderMat.color.setHex(ghostColor);
+
+      // Character ghosts show a sub-tile footprint, chunks a full 8m cell.
+      // The plane's second dimension is local Y (= world Z after the
+      // -90° ground rotation), so both x AND y must be scaled.
+      const fs = isChar ? tSize / CHUNK_CELL : 1;
+      ghostFootprint.scale.set(fs, fs, 1);
+      ghostBorder.scale.set(fs, fs, 1);
+
+      const pickY = getPickPlaneY();
+      ghostFootprint.position.y = pickY + 0.02;
+      ghostBorder.position.y = pickY + 0.025;
+
+      ghostGroupRef.current.position.set(cellX * step, 0, cellZ * step);
+      ghostModelHolder.rotation.y = (ghostRotationRef.current * Math.PI) / 180;
+      ghostGroupRef.current.visible = true;
+      return true;
+    };
+
+    // Unity-style grab pan state: right button drag translates the camera
+    let grabState: { x: number; y: number; moved: boolean } | null = null;
+    let rightPanMoved = false;
+
+    // Pan by converting screen-pixel deltas to world units on the camera's
+    // horizontal right axis and the ground-projected view-up axis
+    const panCameraByPixels = (dxPx: number, dyPx: number) => {
+      const px = frustumSize / Math.max(1, container.clientHeight);
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+      const fwd = new THREE.Vector3();
+      camera.getWorldDirection(fwd);
+      const groundUp = new THREE.Vector3(fwd.x, 0, fwd.z).normalize();
+      // Desired content motion on screen, expressed in world units
+      const delta = new THREE.Vector3()
+        .addScaledVector(right, dxPx * px)
+        .addScaledVector(groundUp, -dyPx * px);
+      camera.position.addScaledVector(delta, -1);
+      camTarget.addScaledVector(delta, -1);
+      camera.lookAt(camTarget);
+    };
+
     const handlePointerMove = (e: MouseEvent) => {
+      // Unity-style grab pan: right button held down translates the camera
+      if (grabState) {
+        const dx = e.clientX - grabState.x;
+        const dy = e.clientY - grabState.y;
+        if (!grabState.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+        grabState.moved = true;
+        grabState.x = e.clientX;
+        grabState.y = e.clientY;
+        renderer.domElement.style.cursor = 'grabbing';
+        panCameraByPixels(dx, dy);
+        return;
+      }
+
+      if (updateGhostForEvent(e)) {
+        setHoveredCoord(null);
+        if (hoverIndicatorRef.current) hoverIndicatorRef.current.visible = false;
+        renderer.domElement.style.cursor = 'crosshair';
+        return;
+      }
+
+      // Edit modes: hovering a placed chunk or character signals "pickable"
+      if (editModeRef.current) {
+        const hit = findPlacedChunkAtEvent(e) || findPlacedNpcAtEvent(e);
+        if (hit) {
+          setHoveredCoord(null);
+          if (hoverIndicatorRef.current) hoverIndicatorRef.current.visible = false;
+          renderer.domElement.style.cursor = editModeRef.current === 'move' ? 'grab' : 'pointer';
+          return;
+        }
+      }
+
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -2309,6 +3678,111 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     };
 
     const handlePointerDown = (e: MouseEvent) => {
+      // Right mouse button: begin grab-pan drag (drag > 3px pans, plain click cancels)
+      if (e.button === 2) {
+        grabState = { x: e.clientX, y: e.clientY, moved: false };
+        return;
+      }
+
+      // Left click in an edit mode: pick up (move), delete, or link doors.
+      // Characters can be deleted the same way as chunks.
+      if (e.button === 0 && !placementSceneRef.current && editModeRef.current) {
+        const hit = findPlacedChunkAtEvent(e);
+        if (hit) {
+          if (editModeRef.current === 'delete') deletePlacedChunk(hit.inst);
+          else if (editModeRef.current === 'link') handleDoorLinkClickRef.current(hit.inst);
+          else startMoveSession(hit.inst);
+        } else if (editModeRef.current === 'delete') {
+          const npcHit = findPlacedNpcAtEvent(e);
+          if (npcHit) deletePlacedNpc(npcHit.inst);
+        } else {
+          // Move mode: characters can be picked up too
+          const npcHit = findPlacedNpcAtEvent(e);
+          if (npcHit) startNpcMoveSession(npcHit.inst);
+        }
+        return;
+      }
+
+      // Click on a door of the active section: walk there and step through it
+      if (e.button === 0 && !placementSceneRef.current && !editModeRef.current) {
+        const hit = findPlacedChunkAtEvent(e);
+        if (hit && hit.inst.type === 'door' && sectOf(hit.inst) === activeSectionRef.current) {
+          if (beginDoorWalkRef.current(hit.inst)) return;
+        }
+      }
+
+      // Placement Mode: left click places the chunk, other interaction paused
+      if (updateGhostForEvent(e)) {
+        if (e.button === 0 && lastGhostCell) {
+          const placement = placementSceneRef.current;
+          if (placement && lastGhostValid) {
+            // Character kinds land on their sub-tile with an idle animation
+            if (placement.type === 'npc' || placement.type === 'enemy') {
+              // A carried character keeps its identity, a fresh one gets a new id
+              const carriedNpc = placement.moveNpcId ? npcMoveSession : null;
+              const instNpc: PlacedNpcInstance = carriedNpc
+                ? {
+                    ...carriedNpc.inst,
+                    col: lastGhostCell.x,
+                    row: lastGhostCell.z,
+                    rotationY: ghostRotationRef.current
+                  }
+                : {
+                    id: makePlacementId(PLACEMENT_ID_PREFIX.npc),
+                    kind: placement.type,
+                    libraryId: placement.libId,
+                    col: lastGhostCell.x,
+                    row: lastGhostCell.z,
+                    rotationY: ghostRotationRef.current,
+                    sectionId: activeSectionRef.current
+                  };
+              mountNpcInstance(instNpc, {
+                scene: placement.gltfScene,
+                animations: placement.animations ?? []
+              });
+              const nextNpcList = [...placedNpcsRef.current.filter(p => p.id !== instNpc.id), instNpc];
+              placedNpcsRef.current = nextNpcList;
+              setPlacedNpcs(nextNpcList);
+              setItem(NPC_PLACEMENTS_KEY, nextNpcList).catch(err => console.warn('npc placement save failed:', err));
+              npcMoveSession = null;
+              repaintGhost();
+              playTactileSfx('success');
+            } else {
+            // A carried chunk keeps its identity, a fresh placement gets a new one
+            const inst: PlacedChunkInstance = moveSession
+              ? {
+                  ...moveSession.inst,
+                  cellX: lastGhostCell.x,
+                  cellZ: lastGhostCell.z,
+                  rotationY: ghostRotationRef.current
+                }
+              : {
+                  id: makePlacementId(PLACEMENT_ID_PREFIX.chunk),
+                  type: placement.type,
+                  libraryId: placement.libId,
+                  cellX: lastGhostCell.x,
+                  cellZ: lastGhostCell.z,
+                  rotationY: ghostRotationRef.current,
+                  sectionId: activeSectionRef.current
+                };
+            placeChunkInstance(inst, placement.gltfScene);
+            const nextList = [...placedChunksRef.current.filter(p => p.id !== inst.id), inst];
+            placedChunksRef.current = nextList;
+            setPlacedChunks(nextList);
+            setItem(CHUNK_PLACEMENTS_KEY, nextList).catch(err => console.warn('placement save failed:', err));
+            moveSession = null;
+            // New floor chunk extends the walkable dungeon grid immediately
+            if (placement.type === 'floor') refreshWalkableTiles();
+            repaintGhost();
+            playTactileSfx('success');
+            }
+          } else {
+            playTactileSfx('hover');
+          }
+        }
+        return;
+      }
+
       if (e.button !== 0) return;
 
       const rect = renderer.domElement.getBoundingClientRect();
@@ -2324,22 +3798,98 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       }
     };
 
+    // Shared cancel routine for every exit path out of Placement Mode
+    const exitPlacement = () => {
+      if (!placementSceneRef.current) return;
+      placementSceneRef.current = null;
+      placementRequestSeqRef.current += 1;
+      // An aborted move puts the carried chunk/character back to its place
+      restoreActiveMove();
+      setPlacementMode(null);
+      if (ghostGroupRef.current) ghostGroupRef.current.visible = false;
+      renderer.domElement.style.cursor = 'default';
+      playTactileSfx('hover');
+    };
+
+    // Mouse wheel: rotates ghost 90° in Placement Mode, zooms camera otherwise
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (placementSceneRef.current) {
+        ghostRotationRef.current = (ghostRotationRef.current + 90) % 360;
+        if (ghostModelHolder) {
+          ghostModelHolder.rotation.y = (ghostRotationRef.current * Math.PI) / 180;
+        }
+        setPlacementMode(prev => (prev ? { ...prev, rotationY: ghostRotationRef.current } : prev));
+        playTactileSfx('hover');
+        repaintGhost();
+        return;
+      }
+      frustumSize = Math.min(30, Math.max(6, frustumSize * (e.deltaY > 0 ? 1.08 : 1 / 1.08)));
+      applyCameraFrustum();
+    };
+
+    // Right click: after an actual grab-pan drag do nothing; a plain right
+    // click in Placement Mode cancels the placement
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      if (rightPanMoved) {
+        rightPanMoved = false;
+        return;
+      }
+      exitPlacement();
+    };
+
+    // ESC while in Placement Mode: cancel. ESC also leaves any chunk edit mode
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      exitPlacement();
+      if (editModeRef.current) {
+        editModeRef.current = null;
+        setEditMode(null);
+        handleLinkModeChangedRef.current(false);
+        renderer.domElement.style.cursor = 'default';
+        playTactileSfx('hover');
+      }
+    };
+
+    // End grab-pan when the button is released or the cursor leaves the canvas
+    const handlePointerUp = (e: MouseEvent) => {
+      if (e.button === 2 && grabState) {
+        rightPanMoved = grabState.moved;
+        grabState = null;
+        if (!rightPanMoved) renderer.domElement.style.cursor = 'default';
+      }
+    };
+    const handlePointerLeave = () => {
+      if (grabState) {
+        rightPanMoved = grabState.moved;
+        grabState = null;
+        renderer.domElement.style.cursor = 'default';
+      }
+    };
+
     renderer.domElement.addEventListener('pointermove', handlePointerMove);
     renderer.domElement.addEventListener('pointerdown', handlePointerDown);
+    renderer.domElement.addEventListener('pointerup', handlePointerUp);
+    renderer.domElement.addEventListener('pointerleave', handlePointerLeave);
+    renderer.domElement.addEventListener('wheel', handleWheel, { passive: false });
+    renderer.domElement.addEventListener('contextmenu', handleContextMenu);
+    window.addEventListener('keydown', handleKeyDown);
+
+    const applyCameraFrustum = () => {
+      if (!container || !camera) return;
+      const newAspect = container.clientWidth / Math.max(1, container.clientHeight);
+      camera.left = (-frustumSize * newAspect) / 2;
+      camera.right = (frustumSize * newAspect) / 2;
+      camera.top = frustumSize / 2;
+      camera.bottom = -frustumSize / 2;
+      camera.updateProjectionMatrix();
+    };
 
     const handleResize = () => {
       if (!container || !rendererRef.current || !cameraRef.current) return;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
-      const newAspect = w / h;
-
-      cameraRef.current.left = (-frustumSize * newAspect) / 2;
-      cameraRef.current.right = (frustumSize * newAspect) / 2;
-      cameraRef.current.top = frustumSize / 2;
-      cameraRef.current.bottom = -frustumSize / 2;
-      cameraRef.current.updateProjectionMatrix();
-
-      rendererRef.current.setSize(w, h);
+      rendererRef.current.setSize(container.clientWidth, container.clientHeight);
+      applyCameraFrustum();
     };
 
     window.addEventListener('resize', handleResize);
@@ -2348,11 +3898,24 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     let animationFrameId: number;
     const timer = new THREE.Timer();
 
+    // When a door walk reaches its target tile the section transition fires
+    const checkDoorArrival = () => {
+      const pending = pendingPortalTileRef.current;
+      if (!pending) return;
+      if (pending.col === currentTileRef.current.col && pending.row === currentTileRef.current.row) {
+        pendingPortalTileRef.current = null;
+        doorArrivalRef.current(pending.doorId);
+      }
+    };
+
     const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
       timer.update();
       const delta = Math.min(timer.getDelta(), 0.1);
       const elapsed = timer.getElapsed();
+
+      // Idle animations of every placed NPC/enemy in the scene
+      for (const npcAnim of npcMixersRef.current) npcAnim.mixer.update(delta);
 
       // Step-by-step Movement Engine
       const charRoot = characterRootRef.current;
@@ -2384,11 +3947,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
               targetWorldPosRef.current = null;
               setAnimState('IDLE');
               updateMovementAnimationRef.current(false);
+              checkDoorArrival();
             }
           } else {
             targetWorldPosRef.current = null;
             setAnimState('IDLE');
             updateMovementAnimationRef.current(false);
+            checkDoorArrival();
           }
         } else {
           const dirVec = new THREE.Vector3().subVectors(targetPos, currentPos).normalize();
@@ -2408,15 +3973,6 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       const moving = targetWorldPosRef.current !== null || moveQueueRef.current.length > 0;
       updateCharacterPoseRef.current(delta, elapsed, moving);
 
-      if (flameMesh) {
-        flameMesh.rotation.y += delta * 2;
-        flameMesh.scale.setScalar(0.92 + Math.sin(elapsed * 14) * 0.08);
-      }
-      if (torchLight) {
-        torchLight.intensity = 1.2 + Math.sin(elapsed * 16) * 0.15;
-      }
-
-
       renderer.render(scene, camera);
     };
 
@@ -2425,8 +3981,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     return () => {
       cancelAnimationFrame(animationFrameId);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('keydown', handleKeyDown);
       renderer.domElement.removeEventListener('pointermove', handlePointerMove);
       renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
+      renderer.domElement.removeEventListener('pointerup', handlePointerUp);
+      renderer.domElement.removeEventListener('pointerleave', handlePointerLeave);
+      renderer.domElement.removeEventListener('wheel', handleWheel);
+      renderer.domElement.removeEventListener('contextmenu', handleContextMenu);
       if (renderer.domElement && renderer.domElement.parentNode) {
         renderer.domElement.parentNode.removeChild(renderer.domElement);
       }
@@ -2508,6 +4069,14 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     }
   };
 
+  // Chunk library lists per type (derived for the dock UI)
+  const floorLibrary = chunkLibrary.filter(e => e.type === 'floor');
+  const wallLibrary = chunkLibrary.filter(e => e.type === 'wall');
+  const doorLibrary = chunkLibrary.filter(e => e.type === 'door');
+  const floorPlacedCount = placedChunks.filter(p => p.type === 'floor').length;
+  const wallPlacedCount = placedChunks.filter(p => p.type === 'wall').length;
+  const doorPlacedCount = placedChunks.filter(p => p.type === 'door').length;
+
   return (
     <div 
       className="relative w-full h-screen bg-gray-950 select-none overflow-hidden font-sans"
@@ -2544,6 +4113,28 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         onChange={handleDoorFileInputChange}
         className="hidden"
       />
+      <input
+        ref={npcFileInputRef}
+        type="file"
+        accept=".glb,.gltf"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) processNpcGLBFile(f, 'npc');
+          e.target.value = '';
+        }}
+        className="hidden"
+      />
+      <input
+        ref={enemyFileInputRef}
+        type="file"
+        accept=".glb,.gltf"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) processNpcGLBFile(f, 'enemy');
+          e.target.value = '';
+        }}
+        className="hidden"
+      />
 
       {/* 3D WebGL Canvas */}
       <div ref={mountRef} className="absolute inset-0 w-full h-full" />
@@ -2571,7 +4162,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             }`}>
               <Square size={28} className="text-emerald-400 mb-2" />
               <span className="font-bold text-sm">Bodenplatte (8x8m)</span>
-              <span className="text-[11px] text-gray-400 mt-1">Ersetzt prozeduralen Boden (0.5m Dicke)</span>
+              <span className="text-[11px] text-gray-400 mt-1">Basis-Chunk 8x8m, Kopien rastern aufs Grid</span>
             </div>
 
             <div className={`p-4 rounded-xl border flex flex-col items-center text-center transition-all ${
@@ -2642,7 +4233,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             <Square size={13} className="text-emerald-400" />
             <span>Boden (8x8m):</span>
             <span className="font-mono text-[11px] text-emerald-300 font-bold max-w-[100px] truncate">
-              {customFloorLoaded ? customFloorName : 'Prozedural'}
+              {customFloorLoaded ? customFloorName : 'Basis: leer'}
             </span>
           </button>
 
@@ -2659,7 +4250,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             <Box size={13} className="text-amber-400" />
             <span>Wand (8m):</span>
             <span className="font-mono text-[11px] text-amber-300 font-bold max-w-[90px] truncate">
-              {customWallLoaded ? customWallName : 'Prozedural'}
+              {customWallLoaded ? customWallName : 'Basis: leer'}
             </span>
           </button>
 
@@ -2708,11 +4299,169 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       </div>
 
       {/* TILE HOVER FLOATER */}
-      {hoveredCoord && (
+      {hoveredCoord && !placementMode && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 pointer-events-none z-10 transition-all duration-150">
           <div className="bg-gray-900/90 border border-cyan-500/40 px-3.5 py-1 rounded-full text-xs text-cyan-300 font-mono shadow-2xl flex items-center gap-2">
             <Footprints size={14} className="text-cyan-400" />
             <span>Klick: Schritt nach Kachel <strong>[{hoveredCoord.col}, {hoveredCoord.row}]</strong></span>
+          </div>
+        </div>
+      )}
+
+      {/* PLACEMENT MODE HUD */}
+      {placementMode && (
+        <div className="absolute inset-x-0 top-16 flex justify-center px-4 pointer-events-none z-30">
+          <div className="pointer-events-auto bg-gray-900/95 backdrop-blur-md border border-cyan-500/60 rounded-2xl px-4 py-2.5 shadow-2xl flex flex-wrap items-center gap-3 max-w-full">
+            <div className={`flex items-center gap-2 ${placementMode.moveInstanceId ? 'text-amber-300' : 'text-cyan-300'}`}>
+              <Move size={18} />
+              <span className="font-bold text-sm tracking-wide">
+                {placementMode.moveInstanceId ? 'Chunk verschieben — Zielfeld wählen'
+                  : placementMode.moveNpcId ? 'Figur verschieben — Zielfeld wählen'
+                  : placementMode.type === 'npc' || placementMode.type === 'enemy' ? 'Charakter platzieren'
+                  : 'Platzierungsmodus'}
+              </span>
+            </div>
+            <span className="text-xs text-gray-200 font-mono bg-gray-800 px-2 py-1 rounded-lg max-w-[180px] truncate" title={placementMode.fileName}>
+              {placementMode.fileName}
+            </span>
+            <span className="text-xs text-amber-300 font-mono font-bold bg-amber-950/60 border border-amber-700/60 px-2 py-1 rounded-lg">
+              Drehung: {placementMode.rotationY}°
+            </span>
+            <div className="hidden md:flex items-center gap-1.5 text-[11px] text-gray-400">
+              <span className="text-cyan-400 font-semibold">Linksklick</span> = {placementMode.moveInstanceId ? 'ablegen' : 'platzieren'}
+              <span className="text-gray-600">•</span>
+              <span className="text-cyan-400 font-semibold">Mausrad</span> = 90° drehen
+              <span className="text-gray-600">•</span>
+              <span className="text-rose-400 font-semibold">ESC / Rechtsklick</span> = {placementMode.moveInstanceId ? 'alte Position' : 'fertig'}
+            </div>
+            <button
+              onClick={cancelPlacement}
+              className="ml-auto px-2.5 py-1 bg-red-950/50 hover:bg-red-900/70 text-red-300 hover:text-white border border-red-800/60 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
+            >
+              <X size={13} />
+              <span>{placementMode.moveInstanceId ? 'Abbrechen' : 'Fertig'}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* CHUNK EDIT TOOLBAR: sections, door links, move / delete placed copies */}
+      {!placementMode && (
+        <div className="absolute inset-x-0 top-16 flex justify-center px-4 pointer-events-none z-20">
+          <div className="pointer-events-auto bg-gray-900/95 backdrop-blur-md border border-gray-700/80 rounded-2xl px-3 py-2 shadow-2xl flex flex-wrap items-center gap-2 max-w-full">
+            {editMode === 'link' ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-bold px-2 py-1 rounded-lg border text-purple-200 bg-purple-950/60 border-purple-700/60">
+                  Türen verbinden
+                </span>
+                <span className="text-[11px] text-gray-400 hidden md:inline">
+                  {linkPickName
+                    ? `Tür "${linkPickName}" gewählt — jetzt den Abschnitt oben wechseln und die Partner-Tür anklicken`
+                    : 'Tür anklicken (wird gelb markiert) → Abschnitt wechseln → Partner-Tür anklicken. Verbundene Tür anklicken = trennen (mit Rückfrage)'}
+                </span>
+              </div>
+            ) : editMode ? (
+              <>
+                <span className={`text-xs font-bold px-2 py-1 rounded-lg border ${
+                  editMode === 'move'
+                    ? 'text-amber-200 bg-amber-950/60 border-amber-700/60'
+                    : 'text-rose-200 bg-rose-950/60 border-rose-700/60'
+                }`}>
+                  {editMode === 'move' ? 'Verschieben-Modus' : 'Entfernen-Modus'}
+                </span>
+                <span className="text-[11px] text-gray-400 hidden md:inline">
+                  {editMode === 'move'
+                    ? 'Chunk anklicken zum Aufnehmen — Klick legt ihn ab, Mausrad dreht'
+                    : 'Chunk anklicken, um die Kopie zu löschen'}
+                </span>
+              </>
+            ) : (
+              <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider hidden md:inline">
+                Abschnitt & Kopien:
+              </span>
+            )}
+
+            <select
+              value={activeSection}
+              onChange={(e) => selectSection(e.target.value)}
+              className="px-2 py-1 text-xs font-semibold rounded-lg border bg-gray-800 text-gray-200 border-gray-700"
+              title="Welcher Abschnitt sichtbar ist und wo neue Chunks platziert werden"
+            >
+              {sections.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+            <button
+              onClick={createSection}
+              className="px-2 py-1 text-xs font-semibold rounded-lg border flex items-center gap-1.5 bg-gray-800 text-emerald-300 border-gray-700 hover:text-white hover:bg-gray-700 transition-colors"
+              title="Einen neuen, leeren Abschnitt anlegen und aktiv schalten"
+            >
+              + Abschnitt
+            </button>
+            <button
+              onClick={() => { toggleEditMode('link'); playTactileSfx('click'); }}
+              className={`px-2 py-1 text-xs font-semibold rounded-lg border flex items-center gap-1.5 transition-colors ${
+                editMode === 'link'
+                  ? 'bg-purple-600 text-white border-purple-400'
+                  : 'bg-gray-800 text-gray-300 border-gray-700 hover:text-white hover:bg-gray-700'
+              }`}
+            >
+              Türen verbinden
+            </button>
+            <button
+              onClick={() => { toggleEditMode('move'); playTactileSfx('click'); }}
+              disabled={placedChunks.length === 0 && placedNpcs.length === 0}
+              className={`px-2 py-1 text-xs font-semibold rounded-lg border flex items-center gap-1.5 transition-colors disabled:opacity-40 ${
+                editMode === 'move'
+                  ? 'bg-amber-600 text-white border-amber-400'
+                  : 'bg-gray-800 text-gray-300 border-gray-700 hover:text-white hover:bg-gray-700'
+              }`}
+            >
+              <Move size={13} /> Verschieben
+            </button>
+            <button
+              onClick={() => { toggleEditMode('delete'); playTactileSfx('click'); }}
+              disabled={placedChunks.length === 0 && placedNpcs.length === 0}
+              className={`px-2 py-1 text-xs font-semibold rounded-lg border flex items-center gap-1.5 transition-colors disabled:opacity-40 ${
+                editMode === 'delete'
+                  ? 'bg-rose-600 text-white border-rose-400'
+                  : 'bg-gray-800 text-gray-300 border-gray-700 hover:text-white hover:bg-gray-700'
+              }`}
+            >
+              <Trash2 size={13} /> Entfernen
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* TRANSIENT HINT PILL (e.g. door leads nowhere) */}
+      {portalHint && (
+        <div className="absolute inset-x-0 top-28 flex justify-center px-4 pointer-events-none z-30">
+          <div className="bg-purple-950/90 border border-purple-600/60 text-purple-200 text-xs font-semibold px-3.5 py-2 rounded-xl shadow-xl backdrop-blur-md max-w-[520px] text-center">
+            {portalHint}
+          </div>
+        </div>
+      )}
+
+      {/* UNLINK CONFIRM DIALOG */}
+      {unlinkAsk && (
+        <div className="absolute inset-x-0 top-28 flex justify-center px-4 pointer-events-none z-40">
+          <div className="pointer-events-auto bg-gray-900/95 border border-purple-500/60 rounded-xl px-4 py-3 shadow-2xl backdrop-blur-md flex items-center gap-3">
+            <span className="text-xs text-gray-200">
+              Verbindung von <strong className="text-purple-300">{unlinkAsk.label}</strong> trennen?
+            </span>
+            <button
+              onClick={() => resolveUnlink(true)}
+              className="px-2.5 py-1 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-lg transition-colors"
+            >
+              Ja, trennen
+            </button>
+            <button
+              onClick={() => resolveUnlink(false)}
+              className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-semibold rounded-lg border border-gray-700 transition-colors"
+            >
+              Nein
+            </button>
           </div>
         </div>
       )}
@@ -2772,7 +4521,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                   <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
                     customFloorLoaded ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-gray-900 text-gray-500'
                   }`}>
-                    {customFloorLoaded ? '8x8m' : 'Prozedural'}
+                    {customFloorLoaded ? '8x8m' : 'leer'}
                   </span>
                 </button>
 
@@ -2789,7 +4538,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                   <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
                     customWallLoaded ? 'bg-amber-950 text-amber-300 border border-amber-700' : 'bg-gray-900 text-gray-500'
                   }`}>
-                    {customWallLoaded ? '8m' : 'Prozedural'}
+                    {customWallLoaded ? '8m' : 'leer'}
                   </span>
                 </button>
 
@@ -2948,6 +4697,66 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                   </div>
                 )}
 
+                {/* NPC & Enemy figure library: upload once, place many */}
+                {(['npc', 'enemy'] as const).map(kind => {
+                  const kindEntries = npcLibrary.filter(e => e.kind === kind);
+                  return (
+                    <div key={kind} className="flex flex-wrap items-center gap-2 pb-1 text-xs">
+                      <span className={`text-[11px] font-semibold uppercase tracking-wider flex items-center gap-1 flex-shrink-0 ${
+                        kind === 'enemy' ? 'text-rose-400' : 'text-cyan-400'
+                      }`}>
+                        {kind === 'enemy' ? <Swords size={13} /> : <Users size={13} />}
+                        <span>{kind === 'enemy' ? 'Gegner' : 'Neutral'} ({kindEntries.length}):</span>
+                      </span>
+                      <button
+                        onClick={() => (kind === 'enemy' ? enemyFileInputRef : npcFileInputRef).current?.click()}
+                        className={`px-2 py-1 text-white text-[11px] font-semibold rounded-lg flex items-center gap-1 transition-colors shadow flex-shrink-0 ${
+                          kind === 'enemy' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-cyan-600 hover:bg-cyan-500'
+                        }`}
+                        title={`Charakter-GLB als ${kind === 'enemy' ? 'Gegner' : 'neutralen Charakter'} hochladen`}
+                      >
+                        <Upload size={11} />
+                        <span>GLB</span>
+                      </button>
+                      {kindEntries.length === 0 && (
+                        <span className="text-[11px] text-gray-500">
+                          Noch keine Datei — einmal hochgeladen, erscheint sie hier zum Platzieren
+                        </span>
+                      )}
+                      {kindEntries.map(entry => {
+                        const isActive = placementMode?.type === kind && placementMode.libId === entry.id;
+                        return (
+                          <div
+                            key={entry.id}
+                            className={`flex items-center rounded-lg border overflow-hidden flex-shrink-0 shadow-sm ${
+                              isActive
+                                ? kind === 'enemy' ? 'bg-rose-600 border-rose-400 text-white' : 'bg-cyan-600 border-cyan-400 text-white'
+                                : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            <button
+                              onClick={() => (isActive ? cancelPlacement() : startPlacement(kind, entry))}
+                              className="pl-2 py-1 flex items-center gap-1.5 text-xs font-semibold"
+                              title={isActive ? 'Platzierungsmodus aktiv — klicken zum Beenden' : 'Figur auf ein freies begehbares Feld platzieren'}
+                            >
+                              {isActive && <Move size={11} className="text-white" />}
+                              {isActive && <span className="text-[10px] font-mono">{placementMode?.rotationY}°</span>}
+                              <span className="max-w-[140px] truncate" title={entry.fileName}>{entry.fileName}</span>
+                            </button>
+                            <button
+                              onClick={() => removeNpcLibraryEntry(entry.id)}
+                              className="px-1.5 py-1 text-rose-300 hover:text-rose-200 transition-colors"
+                              title="Datei aus Bibliothek entfernen (entfernt auch alle platzierten Kopien)"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+
                 {/* Character Adjustments (Scale, Offset Y, Rotation, Animations) */}
                 {customModelLoaded && (
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-gray-950/70 p-3 rounded-xl border border-gray-800/80 text-xs">
@@ -3099,7 +4908,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                       </div>
                     ) : (
                       <span className="text-xs text-gray-300 bg-gray-800 px-2 py-0.5 rounded-lg border border-gray-700">
-                        Prozeduraler Diorama-Boden (7.2m)
+                        Kein Boden-Chunk geladen (Dungeon startet leer)
                       </span>
                     )}
                   </div>
@@ -3117,13 +4926,57 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                       <button
                         onClick={handleResetFloor}
                         className="px-2.5 py-1 bg-red-950/40 hover:bg-red-900/60 text-red-300 hover:text-white border border-red-800/50 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
-                        title="Eigene Bodenplatte entfernen und Standardboden wiederherstellen"
+                        title="Basis-Boden-Chunk entfernen (Kopien in der Bibliothek bleiben erhalten)"
                       >
                         <Trash2 size={13} />
-                        <span>Prozeduralen Boden wiederherstellen</span>
+                        <span>Basis-Chunk entfernen</span>
                       </button>
                     )}
                   </div>
+                </div>
+
+                {/* Chunk Library: previously uploaded files, grid-snapping copies */}
+                <div className="flex flex-wrap items-center gap-2 pb-1 text-xs">
+                  <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider flex items-center gap-1 flex-shrink-0">
+                    <Layers size={13} /> Chunk-Bibliothek ({floorLibrary.length}):
+                  </span>
+                  {floorLibrary.length === 0 && (
+                    <span className="text-[11px] text-gray-500">
+                      Noch keine Datei geladen  - einmal hochgeladen, kann sie immer wieder für neue Kopien gewählt werden.
+                    </span>
+                  )}
+                  {floorLibrary.map(entry => {
+                    const isActive = placementMode?.type === 'floor' && placementMode.libId === entry.id;
+                    return (
+                      <div key={entry.id} className={`flex items-center rounded-lg border overflow-hidden flex-shrink-0 shadow-sm ${isActive ? 'bg-emerald-600 border-emerald-400 text-white' : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:bg-gray-700'}`}>
+                        <button
+                          onClick={() => (isActive ? cancelPlacement() : startPlacement('floor', entry))}
+                          className="pl-2 py-1 flex items-center gap-1.5 text-xs font-semibold"
+                          title={isActive ? 'Platzierungsmodus aktiv  - klicken zum Beenden' : 'Neue 8x8m Kopie auf dem Borderraster platzieren'}
+                        >
+                          {isActive && <Move size={11} className="text-white" />}
+                          {isActive && <span className="text-[10px] font-mono">{placementMode?.rotationY}°</span>}
+                          <span className="max-w-[150px] truncate" title={entry.fileName}>{entry.fileName}</span>
+                        </button>
+                        <button
+                          onClick={() => removeChunkLibraryEntry(entry.id)}
+                          className="px-1.5 py-1 text-rose-300 hover:text-rose-200 transition-colors"
+                          title="Datei aus Bibliothek entfernen (entfernt auch alle platzierten Kopien dieser Datei)"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {floorLibrary.length > 0 && floorPlacedCount > 0 && (
+                    <button
+                      onClick={() => clearPlacementsOfType('floor')}
+                      className="text-[10px] text-gray-400 hover:text-rose-300 bg-gray-900 border border-gray-800 px-2 py-0.5 rounded-full font-mono flex-shrink-0 transition-colors"
+                      title="Alle platzierten Boden-Chunks entfernen (unverändert bleiben Basis-Boden und Bibliothek)"
+                    >
+                      {floorPlacedCount} Kopien • leeren
+                    </button>
+                  )}
                 </div>
 
                 {/* Blender Blueprint Specification Box */}
@@ -3276,7 +5129,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                       </div>
                     ) : (
                       <span className="text-xs text-gray-300 bg-gray-800 px-2 py-0.5 rounded-lg border border-gray-700">
-                        Prozedurale Wände mit Torbogen & Fackeln
+                        Kein Wand-Chunk geladen
                       </span>
                     )}
                   </div>
@@ -3294,13 +5147,57 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                       <button
                         onClick={handleResetWall}
                         className="px-2.5 py-1 bg-red-950/40 hover:bg-red-900/60 text-red-300 hover:text-white border border-red-800/50 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
-                        title="Eigene Wand entfernen und prozedurale Wände wiederherstellen"
+                        title="Basis-Wand-Chunk entfernen (Kopien in der Bibliothek bleiben erhalten)"
                       >
                         <Trash2 size={13} />
-                        <span>Prozedurale Wände wiederherstellen</span>
+                        <span>Basis-Chunk entfernen</span>
                       </button>
                     )}
                   </div>
+                </div>
+
+                {/* Chunk Library: previously uploaded walls, grid-snapping copies */}
+                <div className="flex flex-wrap items-center gap-2 pb-1 text-xs">
+                  <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider flex items-center gap-1 flex-shrink-0">
+                    <Layers size={13} /> Chunk-Bibliothek ({wallLibrary.length}):
+                  </span>
+                  {wallLibrary.length === 0 && (
+                    <span className="text-[11px] text-gray-500">
+                      Noch keine Wand geladen  - einmal hochgeladen, für beliebig viele Kopien verfügbar.
+                    </span>
+                  )}
+                  {wallLibrary.map(entry => {
+                    const isActive = placementMode?.type === 'wall' && placementMode.libId === entry.id;
+                    return (
+                      <div key={entry.id} className={`flex items-center rounded-lg border overflow-hidden flex-shrink-0 shadow-sm ${isActive ? 'bg-amber-600 border-amber-400 text-white' : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:bg-gray-700'}`}>
+                        <button
+                          onClick={() => (isActive ? cancelPlacement() : startPlacement('wall', entry))}
+                          className="pl-2 py-1 flex items-center gap-1.5 text-xs font-semibold"
+                          title={isActive ? 'Platzierungsmodus aktiv  - klicken zum Beenden' : 'Neue Wand-Kopie auf dem Borderraster platzieren'}
+                        >
+                          {isActive && <Move size={11} className="text-white" />}
+                          {isActive && <span className="text-[10px] font-mono">{placementMode?.rotationY}°</span>}
+                          <span className="max-w-[150px] truncate" title={entry.fileName}>{entry.fileName}</span>
+                        </button>
+                        <button
+                          onClick={() => removeChunkLibraryEntry(entry.id)}
+                          className="px-1.5 py-1 text-rose-300 hover:text-rose-200 transition-colors"
+                          title="Datei aus Bibliothek entfernen (entfernt auch alle platzierten Kopien dieser Datei)"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {wallLibrary.length > 0 && wallPlacedCount > 0 && (
+                    <button
+                      onClick={() => clearPlacementsOfType('wall')}
+                      className="text-[10px] text-gray-400 hover:text-rose-300 bg-gray-900 border border-gray-800 px-2 py-0.5 rounded-full font-mono flex-shrink-0 transition-colors"
+                      title="Alle platzierten Wand-Chunks entfernen"
+                    >
+                      {wallPlacedCount} Kopien • leeren
+                    </button>
+                  )}
                 </div>
 
                 {/* Blender Blueprint Specification Box */}
@@ -3314,6 +5211,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                     </div>
                     <p className="text-[11px] text-gray-300 leading-relaxed">
                       Wände werden <strong>ausschließlich links (Left_Wall)</strong> und <strong>oben (Upper_Wall)</strong> aufgestellt. Die vordere und rechte Seite bleiben immer frei, damit Charaktere niemals von einer Wand verdeckt werden.
+                      <br /><br />
+                      <strong>Eckregel:</strong> Pro Feld sind <strong>bis zu zwei Wände möglich</strong>, wenn sie um 90° versetzt stehen (z.B. 0° + 90° = Ecke). Nur Wände in derselben Orientrichtung kollidieren miteinander und blockieren die Zelle.
                     </p>
                   </div>
                 </div>
@@ -3574,6 +5473,50 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                   </div>
                 </div>
 
+                {/* Chunk Library: previously uploaded doors, grid-snapping copies */}
+                <div className="flex flex-wrap items-center gap-2 pb-1 text-xs">
+                  <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider flex items-center gap-1 flex-shrink-0">
+                    <Layers size={13} /> Chunk-Bibliothek ({doorLibrary.length}):
+                  </span>
+                  {doorLibrary.length === 0 && (
+                    <span className="text-[11px] text-gray-500">
+                      Noch keine Tür geladen  - einmal hochgeladen, für beliebig viele Kopien verfügbar.
+                    </span>
+                  )}
+                  {doorLibrary.map(entry => {
+                    const isActive = placementMode?.type === 'door' && placementMode.libId === entry.id;
+                    return (
+                      <div key={entry.id} className={`flex items-center rounded-lg border overflow-hidden flex-shrink-0 shadow-sm ${isActive ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:bg-gray-700'}`}>
+                        <button
+                          onClick={() => (isActive ? cancelPlacement() : startPlacement('door', entry))}
+                          className="pl-2 py-1 flex items-center gap-1.5 text-xs font-semibold"
+                          title={isActive ? 'Platzierungsmodus aktiv  - klicken zum Beenden' : 'Neue Tür-Kopie auf dem Borderraster platzieren'}
+                        >
+                          {isActive && <Move size={11} className="text-white" />}
+                          {isActive && <span className="text-[10px] font-mono">{placementMode?.rotationY}°</span>}
+                          <span className="max-w-[150px] truncate" title={entry.fileName}>{entry.fileName}</span>
+                        </button>
+                        <button
+                          onClick={() => removeChunkLibraryEntry(entry.id)}
+                          className="px-1.5 py-1 text-rose-300 hover:text-rose-200 transition-colors"
+                          title="Datei aus Bibliothek entfernen (entfernt auch alle platzierten Kopien dieser Datei)"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {doorLibrary.length > 0 && doorPlacedCount > 0 && (
+                    <button
+                      onClick={() => clearPlacementsOfType('door')}
+                      className="text-[10px] text-gray-400 hover:text-rose-300 bg-gray-900 border border-gray-800 px-2 py-0.5 rounded-full font-mono flex-shrink-0 transition-colors"
+                      title="Alle platzierten Tür-Chunks entfernen"
+                    >
+                      {doorPlacedCount} Kopien • leeren
+                    </button>
+                  )}
+                </div>
+
                 {/* Blender Blueprint Specification Box */}
                 <div className="bg-purple-950/30 border border-purple-800/40 rounded-xl p-3 text-xs text-purple-200 flex flex-col md:flex-row md:items-center justify-between gap-2">
                   <div className="space-y-0.5">
@@ -3585,6 +5528,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                     </div>
                     <p className="text-[11px] text-gray-300 leading-relaxed">
                       Die Tür nutzt denselben Drehpunkt wie Boden und Wand. Bei <strong>0°</strong> sitzt sie exakt mittig in der <strong>Left_Wall</strong>. Bei <strong>-90°</strong> Drehung liegt sie passgenau mittig in der <strong>Upper_Wall</strong>.
+                      <br /><br />
+                      <strong>Überlappungsregel:</strong> Eine Tür darf immer über bestehenden Wänden sitzen — auch wenn auf dem Feld bereits Wand-Chunks stehen. Nur <strong>Tür auf Tür mit gleicher Orientierung</strong> ist verboten; mit unterschiedlicher Orientierung (z.B. 0° + 90°) sind mehrere Türen pro Feld erlaubt.
                     </p>
                   </div>
                 </div>
