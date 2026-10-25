@@ -355,3 +355,95 @@ export interface AssetItem {
   };
   createdAt: number;
 }
+
+// ==========================================================================
+// 3D Dungeons — the "Build Yourself" GLB sandbox integrated as project data
+// (DungeonEditor tab). Exact chunk/figure semantics live in the editor view.
+// ==========================================================================
+
+export interface DungeonSection {
+  id: string;
+  name: string;
+}
+
+export type DungeonChunkType = 'floor' | 'wall' | 'door';
+export type DungeonNpcKind = 'npc' | 'enemy';
+
+/** One uploaded chunk GLB file, reusable for arbitrarily many placements */
+export interface DungeonChunkLibraryEntry {
+  id: string;
+  type: DungeonChunkType;
+  fileName: string;
+  fileSize: number;
+  dataBase64: string; // Data URL
+}
+
+/** One placed chunk copy on the 8m chunk grid (base copies excluded) */
+export interface DungeonChunkPlacement {
+  id: string;
+  type: DungeonChunkType;
+  libraryId: string;
+  cellX: number;
+  cellZ: number;
+  rotationY: number; // degrees, multiple of 90
+  sectionId?: string; // undefined = root section
+  portalId?: string; // paired door instance (section transition)
+  pairColorIndex?: number;
+}
+
+/** One uploaded character GLB (neutral NPC or enemy), re-placable */
+export interface DungeonNpcLibraryEntry {
+  id: string;
+  kind: DungeonNpcKind;
+  fileName: string;
+  fileSize: number;
+  dataBase64: string; // Data URL
+}
+
+/** One placed character standing on a walkable sub-tile */
+export interface DungeonNpcPlacement {
+  id: string;
+  kind: DungeonNpcKind;
+  libraryId: string;
+  col: number;
+  row: number;
+  rotationY: number;
+  sectionId?: string;
+  /** Phase 2: project character bound to this figure (GLB + stats) */
+  characterId?: string;
+  /** Phase 3: scene id opened when interacting with a neutral figure */
+  sceneId?: string;
+}
+
+/** Base chunk/character GLB mounted at the grid origin (incl. user config) */
+export interface DungeonBaseGLB {
+  fileName: string;
+  fileSize?: number;
+  dataBase64: string;
+  scale?: number;
+  offsetX?: number;
+  offsetY?: number;
+  offsetZ?: number;
+  rotationY?: number;
+  useRawScale?: boolean; // character only
+  showLeftWall?: boolean; // wall/door layout toggles
+  showUpperWall?: boolean;
+  showLeftDoor?: boolean;
+  showUpperDoor?: boolean;
+}
+
+export interface DungeonProject {
+  id: string;
+  name: string;
+  sections: DungeonSection[]; // first entry is always the root section
+  baseFloor?: DungeonBaseGLB | null;
+  baseWall?: DungeonBaseGLB | null;
+  baseDoor?: DungeonBaseGLB | null;
+  baseCharacter?: DungeonBaseGLB | null;
+  chunkLibrary: DungeonChunkLibraryEntry[];
+  placedChunks: DungeonChunkPlacement[];
+  npcLibrary: DungeonNpcLibraryEntry[];
+  placedNpcs: DungeonNpcPlacement[];
+  createdAt: number;
+  updatedAt: number;
+}

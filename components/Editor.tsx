@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Character, CharacterImportance, CharacterAlignment, Scene, WorldMap, Battle, WorldInfo, Chapter, SceneEffect, MapSpot, WorldLocation, Faction, RelationshipTrigger, RelationshipThreshold, StoryLogEntry, AssetItem } from '../types';
+import { Character, CharacterImportance, CharacterAlignment, Scene, WorldMap, Battle, WorldInfo, Chapter, SceneEffect, MapSpot, WorldLocation, Faction, RelationshipTrigger, RelationshipThreshold, StoryLogEntry, AssetItem, DungeonProject, DungeonSection, DungeonBaseGLB, DungeonChunkLibraryEntry, DungeonChunkPlacement, DungeonNpcLibraryEntry, DungeonNpcPlacement, DungeonChunkType, DungeonNpcKind } from '../types';
 import { Button } from './ui/Button';
 import { Trash, Sword, Scaling, Plus, Save, Play, Download, Upload, Monitor, Map as MapIcon, Users, Target, Book, Layout, MessageSquare, Unlock, Lock, Waypoints, Image as ImageIcon, XCircle, Terminal, MapPin, Heart, EyeOff, Video, Music, Sparkles, Loader2, ArrowLeft, Cpu, Check, FolderOpen, ChevronUp, ChevronDown, ExternalLink, X, Move, ChevronLeft, ChevronRight, Search, Compass, Boxes } from 'lucide-react';
 import { CHARACTER_GROUPS, getCharacterGroupKey, getCharacterGroup, CharacterGroupKey } from '../utils/characterUtils';
@@ -10,6 +10,20 @@ import { AssetManager } from './AssetManager';
 import { AssetSelectorModal } from './AssetSelectorModal';
 
 import { saveImage, loadImage, deleteImage } from '../utils/imageStorage';
+import { getItem } from '../utils/db';
+
+// Keys of the raw 3D dungeon sandbox (DungeonTestView) in the keyval store
+const DUNGEON_SANDBOX_KEYS = {
+  chunkLibrary: 'dungeon_chunk_library',
+  placedChunks: 'dungeon_chunk_placements',
+  sections: 'dungeon_sections',
+  npcLibrary: 'dungeon_npc_library',
+  placedNpcs: 'dungeon_npc_placements',
+  baseFloor: 'dungeon_custom_floor_glb',
+  baseWall: 'dungeon_custom_wall_glb',
+  baseDoor: 'dungeon_custom_door_glb',
+  baseCharacter: 'dungeon_custom_glb_config'
+} as const;
 import { generateComfyImage, prepareComfyWorkflow, getDefaultWorkflow, getAvailableLoras, getAvailableCheckpoints } from '../services/comfyService';
 
 export const WorldInfoContext = React.createContext<WorldInfo | null>(null);
@@ -2401,6 +2415,7 @@ interface EditorProps {
   scenes: Scene[];
   maps: WorldMap[];
   battles: Battle[];
+  dungeonProjects?: DungeonProject[];
   assets?: AssetItem[];
   storyLog?: StoryLogEntry[]; // New prop for context awareness
   onUpdateWorldInfo: (w: WorldInfo) => void;
@@ -2409,6 +2424,7 @@ interface EditorProps {
   onUpdateScenes: (s: Scene[]) => void;
   onUpdateMaps: (m: WorldMap[]) => void;
   onUpdateBattles: (b: Battle[]) => void;
+  onUpdateDungeonProjects?: (list: DungeonProject[]) => void;
   onUpdateAssets?: (a: AssetItem[]) => void;
   onPlay: () => void;
   onQuickSave: () => Promise<boolean>;
@@ -2419,16 +2435,26 @@ interface EditorProps {
   hasSaveGame: boolean;
   onContinueGame: () => void;
   onDungeonTest?: () => void;
+  onBuildDungeon?: (id: string) => void;
+  /** Tab the editor opens on (e.g. returning from the dungeon builder) */
+  initialTab?: EditorTab;
 }
 
+export type EditorTab = 'home' | 'world' | 'chapters' | 'chars' | 'scenes' | 'maps' | 'dungeons' | 'battles' | 'assets';
+
 export const Editor: React.FC<EditorProps> = (props) => {
-    const [tab, setTab] = useState<'home' | 'world' | 'chapters' | 'chars' | 'scenes' | 'maps' | 'battles' | 'assets'>('home');
+    const [tab, setTab] = useState<EditorTab>(props.initialTab ?? 'home');
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [isGenerating, setIsGenerating] = useState(false);
     const [scenePrompt, setScenePrompt] = useState("");
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isSubSidebarOpen, setIsSubSidebarOpen] = useState(true);
     const [quickSaveSuccess, setQuickSaveSuccess] = useState(false);
+
+    // Dungeons tab state
+    const [renamingDungeonId, setRenamingDungeonId] = useState<string | null>(null);
+    const [dungeonNameDraft, setDungeonNameDraft] = useState('');
+    const [isImportingSandbox, setIsImportingSandbox] = useState(false);
 
     const [charSearch, setCharSearch] = useState('');
     const [charGroupFilter, setCharGroupFilter] = useState<'all' | CharacterGroupKey>('all');
@@ -2463,6 +2489,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
         { id: 'chars', label: 'Characters', icon: <Users size={16}/> },
         { id: 'scenes', label: 'Scenes', icon: <Monitor size={16}/> },
         { id: 'maps', label: 'Maps', icon: <MapIcon size={16}/> },
+        { id: 'dungeons', label: 'Dungeons', icon: <Boxes size={16}/> },
         { id: 'battles', label: 'Battles', icon: <Target size={16}/> },
         { id: 'assets', label: 'Assets', icon: <FolderOpen size={16}/> },
     ];
@@ -2481,6 +2508,76 @@ export const Editor: React.FC<EditorProps> = (props) => {
 
     const handleImportSave = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files?.[0] && props.onImportSave) props.onImportSave(e.target.files[0]);
+    };
+
+    // -------------------------------------------------------------------
+    // Dungeons tab: catalog of 3D dungeon projects
+    // -------------------------------------------------------------------
+    const updateDungeonProjects = (list: DungeonProject[]) => props.onUpdateDungeonProjects?.(list);
+
+    const createDungeonProject = () => {
+        const list = props.dungeonProjects || [];
+        const project: DungeonProject = {
+            id: crypto.randomUUID(),
+            name: `Dungeon ${list.length + 1}`,
+            sections: [{ id: 'root', name: 'Abschnitt 1' }],
+            chunkLibrary: [], placedChunks: [], npcLibrary: [], placedNpcs: [],
+            createdAt: Date.now(), updatedAt: Date.now()
+        };
+        updateDungeonProjects([...list, project]);
+    };
+
+    // Copies the wild 3D sandbox (DungeonTestView keyval data) into a proper
+    // project entry. The sandbox itself stays untouched as fallback/scratch.
+    const importSandboxToDungeon = async () => {
+        setIsImportingSandbox(true);
+        try {
+            const [storedSections, chunkLibrary, placedChunks, npcLibrary, placedNpcs, baseFloor, baseWall, baseDoor, baseCharacter] = await Promise.all([
+                getItem<Array<{ id: string; name: string }>>(DUNGEON_SANDBOX_KEYS.sections),
+                getItem<DungeonChunkLibraryEntry[]>(DUNGEON_SANDBOX_KEYS.chunkLibrary),
+                getItem<DungeonChunkPlacement[]>(DUNGEON_SANDBOX_KEYS.placedChunks),
+                getItem<DungeonNpcLibraryEntry[]>(DUNGEON_SANDBOX_KEYS.npcLibrary),
+                getItem<DungeonNpcPlacement[]>(DUNGEON_SANDBOX_KEYS.placedNpcs),
+                getItem<DungeonBaseGLB>(DUNGEON_SANDBOX_KEYS.baseFloor),
+                getItem<DungeonBaseGLB>(DUNGEON_SANDBOX_KEYS.baseWall),
+                getItem<DungeonBaseGLB>(DUNGEON_SANDBOX_KEYS.baseDoor),
+                getItem<DungeonBaseGLB>(DUNGEON_SANDBOX_KEYS.baseCharacter)
+            ]);
+
+            const emptySandbox = !chunkLibrary?.length && !placedChunks?.length && !npcLibrary?.length &&
+                !baseFloor && !baseWall && !baseDoor && !baseCharacter;
+            if (emptySandbox) {
+                alert('Die Sandbox ist leer. Baue zuerst im "Dungeon Test" etwas — oder lege einen neuen Dungeon an.');
+                return;
+            }
+
+            const list = props.dungeonProjects || [];
+            const project: DungeonProject = {
+                id: crypto.randomUUID(),
+                name: `Importierter Dungeon ${list.length + 1}`,
+                sections: [
+                    { id: 'root', name: 'Abschnitt 1' },
+                    ...(storedSections || []).filter(s => s.id !== 'root')
+                ],
+                baseFloor: baseFloor || null,
+                baseWall: baseWall || null,
+                baseDoor: baseDoor || null,
+                baseCharacter: baseCharacter || null,
+                chunkLibrary: chunkLibrary || [],
+                placedChunks: placedChunks || [],
+                npcLibrary: npcLibrary || [],
+                placedNpcs: placedNpcs || [],
+                createdAt: Date.now(),
+                updatedAt: Date.now()
+            };
+            updateDungeonProjects([...list, project]);
+            alert('Sandbox als Dungeon-Projekt importiert (Kopie — die Sandbox bleibt unverändert bestehen).');
+        } catch (err) {
+            console.error('Sandbox import failed:', err);
+            alert('Import fehlgeschlagen — Details in der Konsole.');
+        } finally {
+            setIsImportingSandbox(false);
+        }
     };
 
     const handleGenerateScene = async () => {
@@ -3572,6 +3669,114 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                     <MapEditor key={selectedId} map={props.maps.find(m => m.id === selectedId)!} scenes={props.scenes} characters={props.characters} battles={props.battles} allMaps={props.maps} assets={props.assets} onChange={(u) => props.onUpdateMaps(props.maps.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateMaps(props.maps.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
                                 </div>
                             )}
+                        </div>
+                    </div>
+                )}
+                {tab === 'dungeons' && (
+                    <div className="h-full overflow-y-auto pb-8">
+                        <div className="flex flex-wrap gap-2 mb-4">
+                            <Button className="py-1.5 text-sm" onClick={createDungeonProject}><Plus size={14}/> Neuer Dungeon</Button>
+                            <Button
+                                variant="secondary"
+                                className="py-1.5 text-sm"
+                                onClick={importSandboxToDungeon}
+                                disabled={isImportingSandbox}
+                                title="Kopiert den aktuellen Stand der 'Dungeon Test'-Sandbox als eigenständiges Dungeon-Projekt"
+                            >
+                                <Upload size={14}/> {isImportingSandbox ? 'Importiere…' : 'Sandbox importieren'}
+                            </Button>
+                        </div>
+
+                        <div className="mb-5 p-3 bg-sky-950/40 border border-sky-800/60 rounded-xl text-xs text-sky-200 leading-relaxed">
+                            <strong className="font-bold">Hinweis:</strong> „Bauen" öffnet die 3D-Bühne direkt mit diesem
+                            Dungeon-Projekt geladen — Chunks/Figuren hochladen &amp; platzieren, Änderungen werden automatisch
+                            zurück ins Projekt gespeichert. Der „Dungeon Test"-Button in Home/Seitenleiste öffnet weiterhin
+            die separate Sandbox. „Spielen" folgt in Phase 3 (Einstieg über Karten-Spots).
+                        </div>
+
+                        {(props.dungeonProjects || []).length === 0 && (
+                            <div className="p-8 border border-dashed border-gray-700 rounded-xl text-center text-gray-500">
+                                <Boxes size={28} className="mx-auto mb-3 opacity-50"/>
+                                <p className="text-sm font-semibold text-gray-400 mb-1">Noch keine Dungeons angelegt</p>
+                                <p className="text-xs">Lege einen neuen Dungeon an — oder importiere deinen gebauten Sandbox-Dungeon.</p>
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+                            {(props.dungeonProjects || []).map(d => {
+                                const chunkCount = d.placedChunks.length + (d.baseFloor ? 1 : 0);
+                                const figCount = d.placedNpcs.length;
+                                return (
+                                    <div key={d.id} className="p-4 bg-gray-900 border border-gray-800 rounded-xl hover:border-gray-600 transition-colors">
+                                        {renamingDungeonId === d.id ? (
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <input
+                                                    autoFocus
+                                                    value={dungeonNameDraft}
+                                                    onChange={(e) => setDungeonNameDraft(e.target.value)}
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            updateDungeonProjects((props.dungeonProjects || []).map(x =>
+                                                                x.id === d.id ? { ...x, name: dungeonNameDraft.trim() || x.name, updatedAt: Date.now() } : x));
+                                                            setRenamingDungeonId(null);
+                                                        } else if (e.key === 'Escape') {
+                                                            setRenamingDungeonId(null);
+                                                        }
+                                                    }}
+                                                    className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-2 py-1 text-sm text-white focus:outline-none focus:border-emerald-500"
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        updateDungeonProjects((props.dungeonProjects || []).map(x =>
+                                                            x.id === d.id ? { ...x, name: dungeonNameDraft.trim() || x.name, updatedAt: Date.now() } : x));
+                                                        setRenamingDungeonId(null);
+                                                    }}
+                                                    className="text-emerald-400 hover:text-emerald-300 p-1"
+                                                    title="Umbenennen bestätigen"
+                                                ><Check size={14}/></button>
+                                            </div>
+                                        ) : (
+                                            <div className="flex justify-between items-start mb-3">
+                                                <div className="font-bold text-white text-sm pr-2 break-words">{d.name}</div>
+                                                <button
+                                                    onClick={() => { setRenamingDungeonId(d.id); setDungeonNameDraft(d.name); }}
+                                                    className="text-gray-500 hover:text-white p-1 flex-shrink-0"
+                                                    title="Dungeon umbenennen"
+                                                ><Scaling size={13}/></button>
+                                            </div>
+                                        )}
+
+                                        <div className="flex flex-wrap gap-1.5 mb-3 text-[10px] font-mono">
+                                            <span className="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded border border-gray-700">{d.sections.length} Abschnitte</span>
+                                            <span className="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded border border-gray-700">{chunkCount} Chunks</span>
+                                            <span className="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded border border-gray-700">{figCount} Figuren</span>
+                                        </div>
+
+                                        <div className="flex items-center gap-2">
+                                            <Button
+                                                className="flex-1 py-1 text-xs"
+                                                onClick={() => (props.onBuildDungeon ? props.onBuildDungeon(d.id) : props.onDungeonTest?.())}
+                                                title={props.onBuildDungeon ? 'Öffnet die Dungeon-Bühne geladen mit diesem Projekt' : 'Öffnet die Sandbox zum Bauen (Projekt-Anbindung folgt in Phase 2)'}
+                                            ><Play size={12}/> Bauen</Button>
+                                            <Button
+                                                variant="secondary"
+                                                className="flex-1 py-1 text-xs"
+                                                disabled
+                                                title="Spielen kommt mit Phase 3 (Einstieg über Karten-Spot)"
+                                            ><Compass size={12}/> Spielen</Button>
+                                            <button
+                                                onClick={() => {
+                                                    if (window.confirm(`Dungeon "${d.name}" wirklich löschen?`)) {
+                                                        updateDungeonProjects((props.dungeonProjects || []).filter(x => x.id !== d.id));
+                                                    }
+                                                }}
+                                                className="text-rose-400 hover:text-rose-200 p-1.5 rounded hover:bg-rose-950/60 transition-colors"
+                                                title="Dungeon löschen"
+                                            ><Trash size={14}/></button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
                         </div>
                     </div>
                 )}

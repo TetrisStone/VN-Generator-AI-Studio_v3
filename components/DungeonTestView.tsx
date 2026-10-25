@@ -8,13 +8,16 @@ import {
   Trash2, Sliders, Film, HelpCircle, Layers, Box, Grid, Square, DoorClosed, Layers as LayersIcon, Move, X,
   Users, Swords
 } from 'lucide-react';
-import { Character } from '../types';
-import { getItem, setItem } from '../utils/db';
+import { Character, DungeonProject, DungeonBaseGLB } from '../types';
+import { getItem, setItem as setKeyvalItem } from '../utils/db';
 import { loadImage } from '../utils/imageStorage';
 
 interface DungeonTestViewProps {
   onExit: () => void;
   characters?: Character[];
+  /** Phase 2: when given, the builder loads this project and saves changes back */
+  dungeonProject?: DungeonProject;
+  onSaveProject?: (patch: Partial<DungeonProject>) => void;
 }
 
 interface TileCoord {
@@ -139,6 +142,8 @@ interface PlacedNpcInstance {
   row: number;
   rotationY: number; // degrees, multiple of 90 (mouse wheel)
   sectionId?: string; // dungeon section; undefined = root section
+  /** Phase 2: bound project character (its GLB is used as the figure) */
+  characterId?: string;
 }
 
 const CHUNK_LIBRARY_KEY = 'dungeon_chunk_library';
@@ -597,12 +602,66 @@ function createStylizedDoorCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
-export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, characters = [] }) => {
+export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, characters = [], dungeonProject, onSaveProject }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const charFileInputRef = useRef<HTMLInputElement>(null);
   const floorFileInputRef = useRef<HTMLInputElement>(null);
   const wallFileInputRef = useRef<HTMLInputElement>(null);
   const doorFileInputRef = useRef<HTMLInputElement>(null);
+
+  // ---- Phase 2: project binding ----------------------------------------
+  // The bound DungeonProject is the data source in project mode; the raw
+  // sandbox keyval store then stays untouched (changes go to the project
+  // via a debounced snapshot save instead).
+  const dungeonProjectRef = useRef<DungeonProject | null>(dungeonProject ?? null);
+  const isProjectModeRef = useRef<boolean>(!!dungeonProject);
+  const charactersRef = useRef<Character[]>(characters);
+  useEffect(() => {
+    charactersRef.current = characters;
+  }, [characters]);
+  // Wraps the keyval writer: no sandbox writes while bound to a project
+  const setItem = useCallback((key: string, value: unknown) => {
+    if (isProjectModeRef.current) return Promise.resolve();
+    return setKeyvalItem(key, value as any);
+  }, []);
+
+  // Base chunk/character GLB file data (incl. config) for the project snapshot
+  const [baseDataState, setBaseDataState] = useState<{ floor: DungeonBaseGLB | null; wall: DungeonBaseGLB | null; door: DungeonBaseGLB | null; char: DungeonBaseGLB | null }>({ floor: null, wall: null, door: null, char: null });
+  const setBaseData = useCallback((part: 'floor' | 'wall' | 'door' | 'char', data: DungeonBaseGLB | null) => {
+    setBaseDataState(prev => ({ ...prev, [part]: data }));
+  }, []);
+
+  // Restore helper: in project mode every dungeon field comes from the
+  // project bundle; standalone sandbox reads its classic keyval keys
+  const loadDungeonData = useCallback(async <T,>(key: string, projKey: keyof DungeonProject): Promise<T | undefined> => {
+    const proj = dungeonProjectRef.current;
+    if (proj) {
+      const v = proj[projKey];
+      return (v === undefined ? undefined : v) as T | undefined;
+    }
+    return getItem<T>(key);
+  }, []);
+
+  // Set once initEnvironment finished restoring (guards the save-back effect)
+  const restoredInitRef = useRef<boolean>(false);
+
+  // Resolve the GLB of a placed character: sandbox library entry first; when
+  // the figure is bound to a project character, use its model3dSrc (Phase 2)
+  const resolveNpcSourceData = useCallback(async (libraryId: string, characterId?: string): Promise<{ dataBase64: string; fileName: string } | null> => {
+    const entry = npcLibraryRef.current.find(e => e.id === libraryId);
+    if (entry) return { dataBase64: entry.dataBase64, fileName: entry.fileName };
+    const cid = characterId ?? (libraryId.startsWith('proj_') ? libraryId.slice('proj_'.length) : null);
+    if (cid) {
+      const char = charactersRef.current.find(c => c.id === cid);
+      if (char?.model3dSrc) {
+        const data = char.model3dSrc.startsWith('data:')
+          ? char.model3dSrc
+          : await loadImage(char.model3dSrc);
+        if (data) return { dataBase64: data, fileName: `${char.name}.glb` };
+      }
+    }
+    return null;
+  }, []);
 
   // Active Asset Tab in Dock
   const [activeTab, setActiveTab] = useState<'character' | 'floor' | 'wall' | 'door'>('character');
@@ -685,7 +744,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   const [placedChunks, setPlacedChunks] = useState<PlacedChunkInstance[]>([]);
   const placedChunksRef = useRef<PlacedChunkInstance[]>([]);
   const [placementMode, setPlacementMode] = useState<PlacementSession | null>(null);
-  const placementSceneRef = useRef<{ type: PlacementType; libId: string; gltfScene: THREE.Group; animations?: THREE.AnimationClip[]; moveNpcId?: string } | null>(null);
+  const placementSceneRef = useRef<{ type: PlacementType; libId: string; gltfScene: THREE.Group; animations?: THREE.AnimationClip[]; characterId?: string; moveNpcId?: string } | null>(null);
   const placementRequestSeqRef = useRef<number>(0);
   const ghostRotationRef = useRef<number>(0);
 
@@ -739,6 +798,32 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     setUnlinkAsk(null);
     if (ask && accepted) unlinkDoorRef.current(ask.doorId);
   };
+
+  // Phase 2: debounced write-back of the whole dungeon bundle to the bound
+  // project (fires after init restore, on every persisted edit)
+  const onSaveProjectRef = useRef<((patch: Partial<DungeonProject>) => void) | null>(onSaveProject ?? null);
+  useEffect(() => {
+    onSaveProjectRef.current = onSaveProject ?? null;
+  });
+  useEffect(() => {
+    if (!dungeonProjectRef.current || !onSaveProjectRef.current) return;
+    if (!restoredInitRef.current) return;
+    const t = setTimeout(() => {
+      onSaveProjectRef.current?.({
+        sections: sectionsRef.current.map(s => ({ ...s })),
+        chunkLibrary: chunkLibraryRef.current,
+        placedChunks: placedChunksRef.current,
+        npcLibrary: npcLibraryRef.current,
+        placedNpcs: placedNpcsRef.current,
+        baseFloor: baseDataState.floor,
+        baseWall: baseDataState.wall,
+        baseDoor: baseDataState.door,
+        baseCharacter: baseDataState.char,
+        updatedAt: Date.now()
+      });
+    }, 800);
+    return () => clearTimeout(t);
+  }, [chunkLibrary, placedChunks, npcLibrary, placedNpcs, sections, baseDataState]);
 
   // Camera look-at target, mutable outside the mount effect (section teleport)
   const camTargetRef = useRef<THREE.Vector3 | null>(null);
@@ -1665,19 +1750,25 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   }, [playTactileSfx]);
 
   // Enter Placement Mode: parse the library GLB and show a snapping ghost
-  // Works for chunk types (8m grid) and character kinds (sub-tile grid)
-  const startPlacement = useCallback((type: PlacementType, entry: ChunkLibraryEntry | NpcLibraryEntry) => {
+  // Works for chunk types (8m grid) and character kinds (sub-tile grid).
+  // Phase 2: project characters pass their GLB via opts.dataBase64 and are
+  // remembered in the scene via opts.characterId.
+  const startPlacement = useCallback((type: PlacementType, entry: ChunkLibraryEntry | NpcLibraryEntry, opts?: { dataBase64?: string; characterId?: string }) => {
     setHoveredCoord(null);
     setIsLoadingModel(true);
     setLoadingMessage(type === 'npc' || type === 'enemy'
-      ? `Platzierungsmodus: Charakter "${entry.fileName}"...`
+      ? `Platzierungsmodus: Charakter "${opts?.characterId ? (charactersRef.current.find(c => c.id === opts.characterId)?.name ?? entry.fileName) : entry.fileName}"...`
       : `Platzierungsmodus: "${entry.fileName}"...`);
     // Placing something leaves any chunk edit mode
     editModeRef.current = null;
     setEditMode(null);
     handleLinkModeChangedRef.current(false);
+    const dataBase64 = opts?.dataBase64 ?? entry.dataBase64;
+    const labelName = opts?.characterId
+      ? (charactersRef.current.find(c => c.id === opts.characterId)?.name ?? entry.fileName)
+      : entry.fileName;
     try {
-      const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+      const buffer = dataUrlToArrayBuffer(dataBase64);
       const requestToken = ++placementRequestSeqRef.current;
       new GLTFLoader().parse(buffer, '', (gltf) => {
         // User may have cancelled while the file was still parsing
@@ -1690,9 +1781,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           type,
           libId: entry.id,
           gltfScene: gltf.scene,
-          animations: gltf.animations || []
+          animations: gltf.animations || [],
+          characterId: opts?.characterId
         };
-        setPlacementMode({ type, libId: entry.id, fileName: entry.fileName, rotationY: 0 });
+        setPlacementMode({ type, libId: entry.id, fileName: labelName, rotationY: 0 });
         setIsLoadingModel(false);
         applyGhostRef.current?.();
         playTactileSfx('success');
@@ -1786,7 +1878,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         setModelRotationY(0);
 
         try {
-          await setItem(STORAGE_KEY_CHAR_GLB, {
+          const charConfig: DungeonBaseGLB = {
             fileName: file.name,
             fileSize: file.size,
             dataBase64: base64DataUrl,
@@ -1794,7 +1886,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             useRawScale: useRawCharacterScale,
             offsetY: 0.0,
             rotationY: 0.0
-          });
+          };
+          await setItem(STORAGE_KEY_CHAR_GLB, charConfig);
+          setBaseData('char', charConfig);
         } catch (storageErr) {
           console.warn("Could not save GLB to IndexedDB:", storageErr);
         }
@@ -1839,6 +1933,39 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     }
   }, [addNpcLibraryEntry, playTactileSfx]);
 
+  // Start a placement session for a PROJECT character as NPC or enemy
+  // (uses the character's 3D GLB; figures stay bound to the character, so
+  // updating the character's model in the editor updates the figure later)
+  const startProjectNpcPlacement = useCallback(async (kind: NpcKind, char: Character) => {
+    if (!char.model3dSrc) {
+      alert(`Für "${char.name}" ist noch kein 3D-Modell im Charakter-Editor hinterlegt.`);
+      return;
+    }
+    setIsLoadingModel(true);
+    setLoadingMessage(`Lade 3D-Modell für ${char.name}...`);
+    try {
+      const dataUrl = char.model3dSrc.startsWith('data:')
+        ? char.model3dSrc
+        : await loadImage(char.model3dSrc);
+      if (!dataUrl) {
+        alert('3D-Modell im Speicher nicht gefunden.');
+        setIsLoadingModel(false);
+        return;
+      }
+      const pseudoEntry: NpcLibraryEntry = {
+        id: `proj_${char.id}`,
+        kind,
+        fileName: `${char.name}.glb`,
+        fileSize: 0,
+        dataBase64: dataUrl
+      };
+      startPlacement(kind, pseudoEntry, { dataBase64: dataUrl, characterId: char.id });
+    } catch (err) {
+      console.error('Failed to load project character GLB:', err);
+      setIsLoadingModel(false);
+    }
+  }, [startPlacement]);
+
   // Load Floor GLB File
   const processFloorGLBFile = useCallback(async (file: File) => {
     setIsLoadingModel(true);
@@ -1869,7 +1996,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
         // Register in chunk library (file can be re-selected for additional grid copies)
         addChunkLibraryEntry('floor', file.name, file.size, base64DataUrl);        try {
-          await setItem(STORAGE_KEY_FLOOR_GLB, {
+          const floorConfig: DungeonBaseGLB = {
             fileName: file.name,
             fileSize: file.size,
             dataBase64: base64DataUrl,
@@ -1878,7 +2005,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             offsetY: 0.0,
             offsetZ: 0.0,
             rotationY: 0.0
-          });
+          };
+          await setItem(STORAGE_KEY_FLOOR_GLB, floorConfig);
+          setBaseData('floor', floorConfig);
         } catch (storageErr) {
           console.warn("Could not save Floor GLB to IndexedDB:", storageErr);
         }
@@ -1928,7 +2057,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
         // Register in chunk library (file can be re-selected for additional grid copies)
         addChunkLibraryEntry('wall', file.name, file.size, base64DataUrl);        try {
-          await setItem(STORAGE_KEY_WALL_GLB, {
+          const wallConfig: DungeonBaseGLB = {
             fileName: file.name,
             fileSize: file.size,
             dataBase64: base64DataUrl,
@@ -1939,7 +2068,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             rotationY: 0.0,
             showLeftWall: showLeftWall,
             showUpperWall: showUpperWall
-          });
+          };
+          await setItem(STORAGE_KEY_WALL_GLB, wallConfig);
+          setBaseData('wall', wallConfig);
         } catch (storageErr) {
           console.warn("Could not save Wall GLB to IndexedDB:", storageErr);
         }
@@ -1989,7 +2120,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
         // Register in chunk library (file can be re-selected for additional grid copies)
         addChunkLibraryEntry('door', file.name, file.size, base64DataUrl);        try {
-          await setItem(STORAGE_KEY_DOOR_GLB, {
+          const doorConfig: DungeonBaseGLB = {
             fileName: file.name,
             fileSize: file.size,
             dataBase64: base64DataUrl,
@@ -2000,7 +2131,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             rotationY: 0.0,
             showLeftDoor: showLeftDoor,
             showUpperDoor: showUpperDoor
-          });
+          };
+          await setItem(STORAGE_KEY_DOOR_GLB, doorConfig);
+          setBaseData('door', doorConfig);
         } catch (storageErr) {
           console.warn("Could not save Door GLB to IndexedDB:", storageErr);
         }
@@ -2045,6 +2178,14 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         });
         setCustomModelName(`${char.name}.glb`);
         setCustomModelSize(0);
+        setBaseData('char', {
+          fileName: `${char.name}.glb`,
+          dataBase64: dataUrl,
+          scale: char.model3dScale ?? 1.0,
+          useRawScale: useRawCharacterScale,
+          offsetY: char.model3dOffsetY ?? 0.0,
+          rotationY: char.model3dRotationY ?? 0.0
+        });
         setIsLoadingModel(false);
       });
     } catch (err: any) {
@@ -2078,6 +2219,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     setCustomModelLoaded(false);
     setCustomModelName('');
     setCustomModelSize(0);
+    setBaseData('char', null);
     setAvailableClips([]);
     setSelectedIdleClip('');
     setSelectedRunClip('');
@@ -2104,6 +2246,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     }
     floorGltfSceneRef.current = null;
     setCustomFloorLoaded(false);
+    setBaseData('floor', null);
     refreshWalkableTilesRef.current?.({ baseFloor: false });
     setCustomFloorName('');
     setCustomFloorSize(0);
@@ -2130,6 +2273,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     }
     wallGltfSceneRef.current = null;
     setCustomWallLoaded(false);
+    setBaseData('wall', null);
     setCustomWallName('');
     setCustomWallSize(0);
     setWallScale(1.0);
@@ -2149,6 +2293,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_WALL_GLB).then(stored => {
         if (stored) setItem(STORAGE_KEY_WALL_GLB, { ...stored, showLeftWall: next });
       }).catch(err => console.warn(err));
+      setBaseDataState(prevBase => ({
+        ...prevBase,
+        wall: prevBase.wall ? { ...prevBase.wall, showLeftWall: next } : null
+      }));
       return next;
     });
     playTactileSfx('click');
@@ -2160,6 +2308,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_WALL_GLB).then(stored => {
         if (stored) setItem(STORAGE_KEY_WALL_GLB, { ...stored, showUpperWall: next });
       }).catch(err => console.warn(err));
+      setBaseDataState(prevBase => ({
+        ...prevBase,
+        wall: prevBase.wall ? { ...prevBase.wall, showUpperWall: next } : null
+      }));
       return next;
     });
     playTactileSfx('click');
@@ -2180,6 +2332,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     }
     doorGltfSceneRef.current = null;
     setCustomDoorLoaded(false);
+    setBaseData('door', null);
     setCustomDoorName('');
     setCustomDoorSize(0);
     setDoorScale(1.0);
@@ -2199,6 +2352,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_DOOR_GLB).then(stored => {
         if (stored) setItem(STORAGE_KEY_DOOR_GLB, { ...stored, showLeftDoor: next });
       }).catch(err => console.warn(err));
+      setBaseDataState(prevBase => ({
+        ...prevBase,
+        door: prevBase.door ? { ...prevBase.door, showLeftDoor: next } : null
+      }));
       return next;
     });
     playTactileSfx('click');
@@ -2210,6 +2367,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_DOOR_GLB).then(stored => {
         if (stored) setItem(STORAGE_KEY_DOOR_GLB, { ...stored, showUpperDoor: next });
       }).catch(err => console.warn(err));
+      setBaseDataState(prevBase => ({
+        ...prevBase,
+        door: prevBase.door ? { ...prevBase.door, showUpperDoor: next } : null
+      }));
       return next;
     });
     playTactileSfx('click');
@@ -2642,10 +2803,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     scene.add(hoverGroup);
 
 
-    // Check IndexedDB for previously stored custom Character GLB
+    // Check IndexedDB (or bound project) for previously stored custom Character GLB
     const initCharacter = async () => {
       try {
-        const storedGLB = await getItem<StoredGLBConfig>(STORAGE_KEY_CHAR_GLB);
+        const storedGLB = await loadDungeonData<StoredGLBConfig>(STORAGE_KEY_CHAR_GLB, 'baseCharacter');
         if (storedGLB?.dataBase64) {
           const buffer = dataUrlToArrayBuffer(storedGLB.dataBase64);
           const loader = new GLTFLoader();
@@ -2677,7 +2838,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const initEnvironment = async () => {
       // 1. Restore Custom Floor (8m x 8m)
       try {
-        const storedFloor = await getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_FLOOR_GLB);
+        const storedFloor = await loadDungeonData<StoredEnvironmentGLBConfig>(STORAGE_KEY_FLOOR_GLB, 'baseFloor');
         if (storedFloor?.dataBase64) {
           const buffer = dataUrlToArrayBuffer(storedFloor.dataBase64);
           new GLTFLoader().parse(buffer, '', (gltf) => {
@@ -2697,7 +2858,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
       // 2. Restore Custom Wall (8m, North & East)
       try {
-        const storedWall = await getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_WALL_GLB);
+        const storedWall = await loadDungeonData<StoredEnvironmentGLBConfig>(STORAGE_KEY_WALL_GLB, 'baseWall');
         if (storedWall?.dataBase64) {
           const buffer = dataUrlToArrayBuffer(storedWall.dataBase64);
           new GLTFLoader().parse(buffer, '', (gltf) => {
@@ -2719,7 +2880,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
       // 3. Restore Custom Door (center of left wall, upper wall)
       try {
-        const storedDoor = await getItem<StoredEnvironmentGLBConfig>(STORAGE_KEY_DOOR_GLB);
+        const storedDoor = await loadDungeonData<StoredEnvironmentGLBConfig>(STORAGE_KEY_DOOR_GLB, 'baseDoor');
         if (storedDoor?.dataBase64) {
           const buffer = dataUrlToArrayBuffer(storedDoor.dataBase64);
           new GLTFLoader().parse(buffer, '', (gltf) => {
@@ -2742,9 +2903,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       // 4. Restore chunk library and all previously placed grid copies
       try {
         const [storedLibrary, storedPlaced, storedSections] = await Promise.all([
-          getItem<ChunkLibraryEntry[]>(CHUNK_LIBRARY_KEY),
-          getItem<PlacedChunkInstance[]>(CHUNK_PLACEMENTS_KEY),
-          getItem<SectionInfo[]>(CHUNK_SECTIONS_KEY)
+          loadDungeonData<ChunkLibraryEntry[]>(CHUNK_LIBRARY_KEY, 'chunkLibrary'),
+          loadDungeonData<PlacedChunkInstance[]>(CHUNK_PLACEMENTS_KEY, 'placedChunks'),
+          loadDungeonData<SectionInfo[]>(CHUNK_SECTIONS_KEY, 'sections')
         ]);
 
         // Custom sections (the root section always exists)
@@ -2785,10 +2946,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
       // 5. Restore the NPC/enemy library and all placed characters
       try {
-        const [storedNpcLibrary, storedNpcPlaced] = await Promise.all([
-          getItem<NpcLibraryEntry[]>(NPC_LIBRARY_KEY),
-          getItem<PlacedNpcInstance[]>(NPC_PLACEMENTS_KEY)
-        ]);
+        const storedNpcLibrary = await loadDungeonData<NpcLibraryEntry[]>(NPC_LIBRARY_KEY, 'npcLibrary');
+        const storedNpcPlaced = await loadDungeonData<PlacedNpcInstance[]>(NPC_PLACEMENTS_KEY, 'placedNpcs');
 
         if (Array.isArray(storedNpcLibrary) && storedNpcLibrary.length > 0) {
           npcLibraryRef.current = storedNpcLibrary;
@@ -2797,9 +2956,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
         if (Array.isArray(storedNpcPlaced) && storedNpcPlaced.length > 0) {
           for (const inst of storedNpcPlaced) {
-            const entry = storedNpcLibrary?.find(e => e.id === inst.libraryId);
-            if (!entry) continue;
-            const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+            // Library GLB first; figures bound to a project character fall back
+            // to that character's model3dSrc (Phase 2)
+            const source = await resolveNpcSourceData(inst.libraryId, inst.characterId);
+            if (!source) continue;
+            const buffer = dataUrlToArrayBuffer(source.dataBase64);
             await new Promise<void>((resolve) => {
               new GLTFLoader().parse(buffer, '', (gltf) => {
                 mountNpcInstance(inst, { scene: gltf.scene, animations: gltf.animations || [] });
@@ -2813,6 +2974,15 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       } catch (err) {
         console.warn('Failed to restore placed characters:', err);
       }
+
+      // Project snapshot: base GLB files land in the base data state so the
+      // debounced project save-back includes them
+      if (dungeonProjectRef.current) {
+        const p = dungeonProjectRef.current;
+        setBaseDataState({ floor: p.baseFloor ?? null, wall: p.baseWall ?? null, door: p.baseDoor ?? null, char: p.baseCharacter ?? null });
+      }
+      // From here on every edit flows into the project save-back
+      restoredInitRef.current = true;
     };
 
     initCharacter();
@@ -3228,14 +3398,18 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
     // Pick a placed character up: it follows the cursor as ghost until the next
     // click commits the new tile. ESC / Right click restores the original tile.
-    const startNpcMoveSession = (inst: PlacedNpcInstance) => {
-      const entry = npcLibraryRef.current.find(el => el.id === inst.libraryId);
-      if (!entry) return;
+    const startNpcMoveSession = async (inst: PlacedNpcInstance) => {
+      // Library entry first, project character fallback (Phase 2)
+      const source = await resolveNpcSourceData(inst.libraryId, inst.characterId);
+      if (!source) {
+        playTactileSfx('hover');
+        return;
+      }
       setIsLoadingModel(true);
-      setLoadingMessage(`Figur wird aufgenommen: "${entry.fileName}"...`);
+      setLoadingMessage(`Figur wird aufgenommen: "${source.fileName}"...`);
       try {
         const requestToken = ++placementRequestSeqRef.current;
-        const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+        const buffer = dataUrlToArrayBuffer(source.dataBase64);
         new GLTFLoader().parse(buffer, '', (gltf) => {
           // The user switched to something else while the file was parsing
           if (requestToken !== placementRequestSeqRef.current) {
@@ -3252,15 +3426,16 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           ghostRotationRef.current = inst.rotationY;
           placementSceneRef.current = {
             type: inst.kind,
-            libId: entry.id,
+            libId: inst.libraryId,
             gltfScene: gltf.scene,
             animations: gltf.animations || [],
+            characterId: inst.characterId,
             moveNpcId: inst.id
           };
           setPlacementMode({
             type: inst.kind,
-            libId: entry.id,
-            fileName: entry.fileName,
+            libId: inst.libraryId,
+            fileName: source.fileName,
             rotationY: inst.rotationY,
             moveNpcId: inst.id
           });
@@ -3730,7 +3905,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                 : {
                     id: makePlacementId(PLACEMENT_ID_PREFIX.npc),
                     kind: placement.type,
-                    libraryId: placement.libId,
+                    libraryId: placement.characterId ? `proj_${placement.characterId}` : placement.libId,
+                    characterId: placement.characterId,
                     col: lastGhostCell.x,
                     row: lastGhostCell.z,
                     rotationY: ghostRotationRef.current,
@@ -4753,6 +4929,37 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                           </div>
                         );
                       })}
+                      {/* Phase 2: project characters placed as figures */}
+                      {characters.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2 w-full pt-1">
+                          <span className="text-[10px] text-gray-500 font-semibold uppercase tracking-wider flex items-center gap-1 flex-shrink-0">
+                            <Layers size={11} /> Aus Projekt:
+                          </span>
+                          {characters.filter(c => c.model3dSrc).map(char => {
+                            const isActive = placementMode?.type === kind && placementMode.libId === `proj_${char.id}`;
+                            return (
+                              <div
+                                key={char.id}
+                                className={`flex items-center rounded-lg border overflow-hidden flex-shrink-0 shadow-sm ${
+                                  isActive
+                                    ? kind === 'enemy' ? 'bg-rose-600 border-rose-400 text-white' : 'bg-cyan-600 border-cyan-400 text-white'
+                                    : 'bg-gray-800/60 text-gray-200 border-gray-700 hover:bg-gray-700'
+                                }`}
+                              >
+                                <button
+                                  onClick={() => (isActive ? cancelPlacement() : startProjectNpcPlacement(kind, char))}
+                                  className="pl-2 py-1 flex items-center gap-1.5 text-xs font-semibold"
+                                  title={isActive ? 'Platzierungsmodus aktiv — klicken zum Beenden' : `${char.name} als ${kind === 'enemy' ? 'Gegner' : 'Neutralen-Charakter'} platzieren (3D-GLB aus dem Projekt)`}
+                                >
+                                  <span style={{ color: kind === 'enemy' ? '#ffe4e6' : (char.rpgColor || '#38bdf8') }}>●</span>
+                                  <span className="max-w-[120px] truncate">{char.name}</span>
+                                  <span className="text-[9px] bg-gray-900/60 text-gray-300 px-1 rounded font-mono font-bold">3D</span>
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}

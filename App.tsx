@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Editor } from './components/Editor';
+import { Editor, EditorTab } from './components/Editor';
 import { Player } from './components/Player';
 import { RPGWorld } from './components/RPGWorld';
 import { BattleArena } from './components/BattleArena';
@@ -10,7 +10,7 @@ import { SettingsOverlay } from './components/SettingsOverlay';
 import { DungeonTestView } from './components/DungeonTestView';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { audioManager } from './utils/audioManager';
-import { Character, Scene, GameSaveData, RPGState, WorldMap, ChatMessage, Battle, WorldInfo, Chapter, StoryLogEntry, AssetItem } from './types';
+import { Character, Scene, GameSaveData, RPGState, WorldMap, ChatMessage, Battle, WorldInfo, Chapter, StoryLogEntry, AssetItem, DungeonProject } from './types';
 import { getItem, setItem, getProjectItem, setProjectItem } from './utils/db';
 import { loadImage, saveImage } from './utils/imageStorage';
 import JSZip from 'jszip';
@@ -193,6 +193,9 @@ const App: React.FC = () => {
   const [scenes, setScenes] = useState<Scene[]>(DEFAULT_SCENES);
   const [maps, setMaps] = useState<WorldMap[]>(DEFAULT_MAPS);
   const [battles, setBattles] = useState<Battle[]>(DEFAULT_BATTLES);
+  const [dungeonProjects, setDungeonProjects] = useState<DungeonProject[]>([]);
+  const [activeDungeonBuildId, setActiveDungeonBuildId] = useState<string | null>(null);
+  const [editorInitialTab, setEditorInitialTab] = useState<EditorTab>('home');
   const [assets, setAssets] = useState<AssetItem[]>([]);
   
   // Game Play State
@@ -265,6 +268,7 @@ const App: React.FC = () => {
             data.battles = await getProjectItem('battles');
             data.maps = await getProjectItem('maps');
             data.assets = await getProjectItem('assets');
+            data.dungeonProjects = await getProjectItem('dungeons');
             
             if (data.worldInfo || data.chapters || data.characters || data.scenes || data.assets) {
                 hasData = true;
@@ -383,19 +387,22 @@ const App: React.FC = () => {
             else if (data.mapConfig) setMaps([{ ...data.mapConfig, id: 'map1', name: 'Default Map' }]);
 
             if (data.assets) setAssets(data.assets);
+
+            if (data.dungeonProjects) setDungeonProjects(data.dungeonProjects);
         }
     };
     initLoad();
   }, []);
 
   const handleQuickSave = async () => {
-    const data = { worldInfo, chapters, characters, scenes, maps, battles, assets };
+    const data = { worldInfo, chapters, characters, scenes, maps, battles, dungeonProjects, assets };
     await setProjectItem('worldInfo', data.worldInfo);
     await setProjectItem('chapters', data.chapters);
     await setProjectItem('characters', data.characters);
     await setProjectItem('scenes', data.scenes);
     await setProjectItem('battles', data.battles);
     await setProjectItem('maps', data.maps);
+    await setProjectItem('dungeons', data.dungeonProjects);
     await setProjectItem('assets', data.assets);
     return true;
   };
@@ -403,7 +410,7 @@ const App: React.FC = () => {
   const handleExportProject = async (includeMedia: boolean = true) => {
     setIsProcessing(true);
     try {
-      const data = { worldInfo, chapters, characters, scenes, maps, battles, assets };
+      const data = { worldInfo, chapters, characters, scenes, maps, battles, dungeonProjects, assets };
       
       const zip = new JSZip();
       zip.file("project.json", JSON.stringify(data, null, 2));
@@ -679,12 +686,16 @@ const App: React.FC = () => {
       if (data.assets) setAssets(data.assets);
       else setAssets([]);
 
+      if (data.dungeonProjects) setDungeonProjects(data.dungeonProjects);
+      else setDungeonProjects([]);
+
       await setProjectItem('worldInfo', data.worldInfo);
       await setProjectItem('chapters', data.chapters);
       await setProjectItem('characters', data.characters);
       await setProjectItem('scenes', data.scenes);
       await setProjectItem('battles', data.battles);
       await setProjectItem('maps', data.maps);
+      await setProjectItem('dungeons', data.dungeonProjects || []);
       await setProjectItem('assets', data.assets || []);
       
       alert("Project loaded successfully!");
@@ -1104,6 +1115,11 @@ const App: React.FC = () => {
               onUpdateScenes={setScenes}
               onUpdateMaps={setMaps}
               onUpdateBattles={setBattles}
+              dungeonProjects={dungeonProjects}
+              onUpdateDungeonProjects={(next) => {
+                setDungeonProjects(next);
+                setProjectItem('dungeons', next).catch(console.error);
+              }}
               onUpdateAssets={(updatedAssets) => {
                 setAssets(updatedAssets);
                 setProjectItem('assets', updatedAssets).catch(console.error);
@@ -1117,6 +1133,8 @@ const App: React.FC = () => {
               hasSaveGame={hasSaveGame}
               onContinueGame={handleContinueGame}
               onDungeonTest={() => setMode('dungeon_test')}
+              onBuildDungeon={(id) => { setActiveDungeonBuildId(id); setEditorInitialTab('dungeons'); setMode('dungeon_test'); }}
+              initialTab={editorInitialTab}
             />
           </motion.div>
         )}
@@ -1226,6 +1244,14 @@ const App: React.FC = () => {
               <DungeonTestView 
                 onExit={() => setMode('edit')}
                 characters={characters}
+                dungeonProject={dungeonProjects.find(d => d.id === activeDungeonBuildId) || undefined}
+                onSaveProject={(patch) => {
+                  setDungeonProjects(prev => {
+                    const next = prev.map(d => d.id === activeDungeonBuildId ? { ...d, ...patch } : d);
+                    setProjectItem('dungeons', next).catch(console.error);
+                    return next;
+                  });
+                }}
               />
             </ErrorBoundary>
           </motion.div>
