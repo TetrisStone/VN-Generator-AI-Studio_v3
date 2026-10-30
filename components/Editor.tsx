@@ -1857,12 +1857,13 @@ interface MapEditorProps {
     characters: Character[];
     battles: Battle[];
     allMaps: WorldMap[];
+    dungeons?: DungeonProject[];
     assets?: AssetItem[];
     onChange: (u: Partial<WorldMap>) => void;
     onDelete: () => void;
 }
 
-const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles, allMaps, assets, onChange, onDelete }) => {
+const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles, allMaps, dungeons = [], assets, onChange, onDelete }) => {
     const [selectedSpotId, setSelectedSpotId] = useState<string | null>(null);
     const [draggingSpotId, setDraggingSpotId] = useState<string | null>(null);
     const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -2066,19 +2067,21 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                         <option value="character">Character</option>
                                         <option value="battle">Battle</option>
                                         <option value="transition">Transition</option>
+                                        <option value="dungeon">Dungeon</option>
                                     </select>
                                 </div>
                                 <div>
                                     <label className="text-[10px] font-bold text-gray-400 uppercase">Ziel (Target)</label>
                                     <select 
                                         className="w-full bg-gray-800 border border-gray-700 rounded p-1.5 text-xs text-white focus:border-amber-500 focus:outline-none"
-                                        value={selectedSpot.sceneId || selectedSpot.characterId || selectedSpot.battleId || selectedSpot.targetMapId || ''}
+                                        value={selectedSpot.sceneId || selectedSpot.characterId || selectedSpot.battleId || selectedSpot.targetMapId || selectedSpot.dungeonId || ''}
                                         onChange={e => {
                                             const val = e.target.value;
                                             if (selectedSpot.type === 'scene') updateSpot(selectedSpot.id, { sceneId: val });
                                             if (selectedSpot.type === 'character') updateSpot(selectedSpot.id, { characterId: val });
                                             if (selectedSpot.type === 'battle') updateSpot(selectedSpot.id, { battleId: val });
                                             if (selectedSpot.type === 'transition') updateSpot(selectedSpot.id, { targetMapId: val });
+                                            if (selectedSpot.type === 'dungeon') updateSpot(selectedSpot.id, { dungeonId: val });
                                         }}
                                     >
                                         <option value="">-- Auswählen --</option>
@@ -2086,6 +2089,7 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                         {selectedSpot.type === 'character' && characters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                                         {selectedSpot.type === 'battle' && battles.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                                         {selectedSpot.type === 'transition' && allMaps.filter(m => m.id !== map.id).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                        {selectedSpot.type === 'dungeon' && dungeons.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
                                     </select>
                                 </div>
                             </div>
@@ -2199,19 +2203,21 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                          <option value="character">Character</option>
                                          <option value="battle">Battle</option>
                                          <option value="transition">Transition</option>
+                                         <option value="dungeon">Dungeon</option>
                                      </select>
                                  </div>
                                  <div>
                                      <label className="text-[10px] font-bold text-gray-500 uppercase">Target</label>
                                      <select 
                                         className="w-full bg-gray-900 border border-gray-600 rounded p-1 text-xs text-white"
-                                        value={spot.sceneId || spot.characterId || spot.battleId || spot.targetMapId || ''}
+                                        value={spot.sceneId || spot.characterId || spot.battleId || spot.targetMapId || spot.dungeonId || ''}
                                         onChange={e => {
                                             const val = e.target.value;
                                             if (spot.type === 'scene') updateSpot(spot.id, { sceneId: val });
                                             if (spot.type === 'character') updateSpot(spot.id, { characterId: val });
                                             if (spot.type === 'battle') updateSpot(spot.id, { battleId: val });
                                             if (spot.type === 'transition') updateSpot(spot.id, { targetMapId: val });
+                                            if (spot.type === 'dungeon') updateSpot(spot.id, { dungeonId: val });
                                         }}
                                      >
                                          <option value="">-- Select --</option>
@@ -2219,6 +2225,7 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                          {spot.type === 'character' && characters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                                          {spot.type === 'battle' && battles.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                                          {spot.type === 'transition' && allMaps.filter(m => m.id !== map.id).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                         {spot.type === 'dungeon' && dungeons.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
                                      </select>
                                  </div>
                             </div>
@@ -3666,7 +3673,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                     <button className="md:hidden mb-4 text-emerald-400 font-bold flex items-center gap-1.5" onClick={() => setSelectedId(null)}>
                                         <ArrowLeft size={16}/> Back to Maps
                                     </button>
-                                    <MapEditor key={selectedId} map={props.maps.find(m => m.id === selectedId)!} scenes={props.scenes} characters={props.characters} battles={props.battles} allMaps={props.maps} assets={props.assets} onChange={(u) => props.onUpdateMaps(props.maps.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateMaps(props.maps.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
+                                    <MapEditor key={selectedId} map={props.maps.find(m => m.id === selectedId)!} scenes={props.scenes} characters={props.characters} battles={props.battles} allMaps={props.maps} dungeons={props.dungeonProjects} assets={props.assets} onChange={(u) => props.onUpdateMaps(props.maps.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateMaps(props.maps.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
                                 </div>
                             )}
                         </div>

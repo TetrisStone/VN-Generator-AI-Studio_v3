@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { Character, RPGState, WorldMap, Scene, Battle } from '../types';
+import { Character, RPGState, WorldMap, Scene, Battle, DungeonProject } from '../types';
 import { Save, LogOut, MapPin, Book } from 'lucide-react';
 import { loadImage } from '../utils/imageStorage';
 
@@ -13,7 +13,8 @@ interface RPGWorldProps {
   maps: WorldMap[]; // For referencing target map names
   scenes: Scene[]; // Needed to check dependencies
   battles?: Battle[]; // Needed for battle data
-  onInteraction: (type: 'scene'|'transition'|'character'|'battle', id: string) => void;
+  dungeons?: DungeonProject[]; // Phase 3: dungeon entrances
+  onInteraction: (type: 'scene'|'transition'|'character'|'battle'|'dungeon', id: string) => void;
   initialState?: RPGState;
   onSave: (state: RPGState) => void;
   onExit: () => void;
@@ -26,6 +27,7 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
   maps,
   scenes,
   battles = [],
+  dungeons = [],
   onInteraction, 
   initialState, 
   onSave,
@@ -155,6 +157,9 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
 
       } else if (spot.type === 'character') {
           return !!spot.characterId;
+      } else if (spot.type === 'dungeon') {
+          // Phase 3: dungeon entrance — visible as long as the project exists
+          return !!spot.dungeonId;
       }
       return true;
   }), [mapConfig.spots, initialState?.hiddenIds, initialState?.unlockedIds, initialState?.completedSceneIds, initialState?.completedBattleIds, scenes, battles]);
@@ -199,6 +204,7 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
       else if (hit.type === 'character' && hit.characterId) onInteraction('character', hit.characterId);
       else if (hit.type === 'transition' && hit.targetMapId) onInteraction('transition', hit.targetMapId);
       else if (hit.type === 'battle' && hit.battleId) onInteraction('battle', hit.battleId);
+      else if (hit.type === 'dungeon' && hit.dungeonId) onInteraction('dungeon', hit.dungeonId);
     }
   };
 
@@ -352,6 +358,33 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
                   ctx.lineTo(cx + 1, cy + 3);
                   ctx.strokeStyle = 'white';
                   ctx.stroke();
+              } else if (spot.type === 'dungeon') {
+                  // Phase 3: violet arch with a dark doorway
+                  const size = (isHovered ? 14 : 10) * baseScale;
+                  ctx.save();
+                  ctx.translate(cx, cy);
+                  ctx.shadowColor = 'black';
+                  ctx.shadowBlur = 5;
+
+                  ctx.beginPath();
+                  ctx.arc(0, 0, size, 0, Math.PI * 2);
+                  ctx.fillStyle = '#7c3aed'; // Violet-600
+                  ctx.fill();
+                  ctx.strokeStyle = '#c4b5fd';
+                  ctx.lineWidth = 2;
+                  ctx.stroke();
+
+                  // Doorway
+                  ctx.fillStyle = '#2e1065';
+                  ctx.beginPath();
+                  ctx.moveTo(-size * 0.4, size * 0.7);
+                  ctx.lineTo(-size * 0.4, 0);
+                  ctx.arc(0, 0, size * 0.4, Math.PI, 0);
+                  ctx.lineTo(size * 0.4, size * 0.7);
+                  ctx.closePath();
+                  ctx.fill();
+
+                  ctx.restore();
               }
           }
 
@@ -362,6 +395,7 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
             else if (spot.type === 'battle' && spot.battleId) labelName = battles.find(b => b.id === spot.battleId)?.name || "Battle";
             else if (spot.type === 'character' && spot.characterId) labelName = characters.find(c => c.id === spot.characterId)?.name || "Character";
             else if (spot.type === 'transition' && spot.targetMapId) labelName = `To ${maps.find(m => m.id === spot.targetMapId)?.name || 'Area'}`;
+            else if (spot.type === 'dungeon' && spot.dungeonId) labelName = `Dungeon: ${dungeons.find(d => d.id === spot.dungeonId)?.name || 'Unbenannt'}`;
 
             ctx.save();
             ctx.translate(cx, cy - 40); // Lift label higher
@@ -383,7 +417,7 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
         bgImage.onload = drawScene;
     }
     ctx.restore();
-  }, [mapConfig, characters, scenes, battles, hoveredSpotId, spritesLoaded, visibleSpots, bgDataUrl]);
+  }, [mapConfig, characters, scenes, battles, dungeons, hoveredSpotId, spritesLoaded, visibleSpots, bgDataUrl]);
 
   const handleManualSave = () => {
     onSave({ 

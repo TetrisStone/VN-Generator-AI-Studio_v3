@@ -184,7 +184,7 @@ function dataURLToUint8Array(dataUrl: string): { array: Uint8Array; mimeType: st
 }
 
 const App: React.FC = () => {
-  const [mode, setMode] = useState<'edit' | 'rpg' | 'vn' | 'battle' | 'dungeon_test'>('edit');
+  const [mode, setMode] = useState<'edit' | 'rpg' | 'vn' | 'battle' | 'dungeon_test' | 'dungeon_play'>('edit');
   
   // Data State
   const [worldInfo, setWorldInfo] = useState<WorldInfo>(DEFAULT_WORLD);
@@ -195,6 +195,7 @@ const App: React.FC = () => {
   const [battles, setBattles] = useState<Battle[]>(DEFAULT_BATTLES);
   const [dungeonProjects, setDungeonProjects] = useState<DungeonProject[]>([]);
   const [activeDungeonBuildId, setActiveDungeonBuildId] = useState<string | null>(null);
+  const [playingDungeonId, setPlayingDungeonId] = useState<string | null>(null);
   const [editorInitialTab, setEditorInitialTab] = useState<EditorTab>('home');
   const [assets, setAssets] = useState<AssetItem[]>([]);
   
@@ -824,7 +825,7 @@ const App: React.FC = () => {
       return true;
   };
 
-  const handleInteraction = (type: 'scene'|'transition'|'character'|'battle', id: string) => {
+  const handleInteraction = (type: 'scene'|'transition'|'character'|'battle'|'dungeon', id: string) => {
       // Check if locked/hidden first
       if (rpgState.hiddenIds.includes(id)) return;
 
@@ -862,6 +863,13 @@ const App: React.FC = () => {
          if (battle) {
              setActiveBattleId(battle.id);
              setMode('battle');
+         }
+      } else if (type === 'dungeon') {
+         // Phase 3: dungeon entrance on the world map
+         const dungeon = dungeonProjects.find(d => d.id === id);
+         if (dungeon) {
+             setPlayingDungeonId(dungeon.id);
+             setMode('dungeon_play');
          }
       } else {
           const scene = scenes.find(s => s.id === id);
@@ -1154,6 +1162,7 @@ const App: React.FC = () => {
               maps={maps}
               scenes={scenes}
               battles={battles}
+              dungeons={dungeonProjects}
               initialState={rpgState}
               onInteraction={handleInteraction}
               onSave={async (updatedRpgState) => {
@@ -1244,6 +1253,7 @@ const App: React.FC = () => {
               <DungeonTestView 
                 onExit={() => setMode('edit')}
                 characters={characters}
+                scenes={scenes}
                 dungeonProject={dungeonProjects.find(d => d.id === activeDungeonBuildId) || undefined}
                 onSaveProject={(patch) => {
                   setDungeonProjects(prev => {
@@ -1251,6 +1261,31 @@ const App: React.FC = () => {
                     setProjectItem('dungeons', next).catch(console.error);
                     return next;
                   });
+                }}
+              />
+            </ErrorBoundary>
+          </motion.div>
+        )}
+
+        {mode === 'dungeon_play' && (
+          <motion.div 
+            className="w-full h-screen"
+            key={`dungeon-play-${playingDungeonId}`}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.4 }}
+          >
+            <ErrorBoundary fallbackTitle="Fehler in der 3D-Bühne" onReset={() => setMode('rpg')}>
+              <DungeonTestView
+                onExit={() => setMode('rpg')}
+                characters={characters}
+                scenes={scenes}
+                dungeonProject={dungeonProjects.find(d => d.id === playingDungeonId) || undefined}
+                playMode
+                onSceneStart={(sceneId) => {
+                  const sc = scenes.find(s => s.id === sceneId);
+                  if (sc) startScene(sc);
                 }}
               />
             </ErrorBoundary>

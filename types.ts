@@ -254,11 +254,12 @@ export interface MapSpot {
   id: string;
   x: number;
   y: number;
-  type: 'scene' | 'character' | 'battle' | 'transition';
+  type: 'scene' | 'character' | 'battle' | 'transition' | 'dungeon';
   sceneId?: string;
   characterId?: string;
   battleId?: string;
   targetMapId?: string;
+  dungeonId?: string;
   visualCharacterId?: string;
 }
 

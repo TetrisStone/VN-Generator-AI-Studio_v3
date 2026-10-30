@@ -8,16 +8,21 @@ import {
   Trash2, Sliders, Film, HelpCircle, Layers, Box, Grid, Square, DoorClosed, Layers as LayersIcon, Move, X,
   Users, Swords
 } from 'lucide-react';
-import { Character, DungeonProject, DungeonBaseGLB } from '../types';
+import { Character, Scene, DungeonProject, DungeonBaseGLB } from '../types';
 import { getItem, setItem as setKeyvalItem } from '../utils/db';
 import { loadImage } from '../utils/imageStorage';
 
 interface DungeonTestViewProps {
   onExit: () => void;
   characters?: Character[];
+  scenes?: Scene[];
   /** Phase 2: when given, the builder loads this project and saves changes back */
   dungeonProject?: DungeonProject;
   onSaveProject?: (patch: Partial<DungeonProject>) => void;
+  /** Phase 3: play mode — no builder UI, walk & interact with E */
+  playMode?: boolean;
+  /** Phase 3: fired when the player talks to a neutral figure bound to a scene */
+  onSceneStart?: (sceneId: string) => void;
 }
 
 interface TileCoord {
@@ -144,6 +149,8 @@ interface PlacedNpcInstance {
   sectionId?: string; // dungeon section; undefined = root section
   /** Phase 2: bound project character (its GLB is used as the figure) */
   characterId?: string;
+  /** Phase 3: scene opened when the player presses E next to this figure */
+  sceneId?: string;
 }
 
 const CHUNK_LIBRARY_KEY = 'dungeon_chunk_library';
@@ -602,7 +609,7 @@ function createStylizedDoorCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
-export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, characters = [], dungeonProject, onSaveProject }) => {
+export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, characters = [], scenes = [], dungeonProject, onSaveProject, playMode, onSceneStart }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const charFileInputRef = useRef<HTMLInputElement>(null);
   const floorFileInputRef = useRef<HTMLInputElement>(null);
@@ -644,6 +651,39 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
   // Set once initEnvironment finished restoring (guards the save-back effect)
   const restoredInitRef = useRef<boolean>(false);
+
+  // Phase 3: pick the interactable figure — nearest placed figure (same
+  // section) within ~1.5 sub-tiles of where the character just stopped
+  const updateInteractable = useCallback(() => {
+    if (!playModeRef.current) return;
+    const cur = currentTileRef.current;
+    const sect = activeSectionRef.current;
+    let best: PlacedNpcInstance | null = null;
+    let bestD = Infinity;
+    for (const n of placedNpcsRef.current) {
+      if ((n.sectionId ?? 'root') !== sect) continue;
+      const d = Math.hypot(n.col - cur.col, n.row - cur.row);
+      if (d <= 1.5 && d < bestD) { bestD = d; best = n; }
+    }
+    if (!best) {
+      if (interactTargetRef.current) {
+        interactTargetRef.current = null;
+        setInteractTargetLabel(null);
+      }
+      return;
+    }
+    if (interactTargetRef.current?.id === best.id) return;
+    interactTargetRef.current = best;
+    const name = charactersRef.current.find(c => c.id === best.characterId)?.name
+      ?? npcLibraryRef.current.find(e => e.id === best.libraryId)?.fileName
+      ?? 'Figur';
+    setInteractTargetLabel({ id: best.id, kind: best.kind, name });
+  }, []);
+
+  useEffect(() => {
+    updateInteractableRef.current = updateInteractable;
+  });
+
 
   // Resolve the GLB of a placed character: sandbox library entry first; when
   // the figure is bound to a project character, use its model3dSrc (Phase 2)
@@ -789,6 +829,40 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   // Confirm dialog before unlinking a door pair
   const [unlinkAsk, setUnlinkAsk] = useState<{ doorId: string; label: string } | null>(null);
   const askUnlinkRef = useRef<(doorId: string, label: string) => void>(() => {});
+
+  // ---- Phase 3: play mode ------------------------------------------------
+  const playModeRef = useRef<boolean>(!!playMode);
+  const onExitRef = useRef<() => void>(onExit);
+  const onSceneStartRef = useRef<((sceneId: string) => void) | null>(onSceneStart ?? null);
+  useEffect(() => {
+    onSceneStartRef.current = onSceneStart ?? null;
+  });
+  // The figure currently close enough to interact with (nearest neighbour)
+  const interactTargetRef = useRef<PlacedNpcInstance | null>(null);
+  const [interactTargetLabel, setInteractTargetLabel] = useState<{ id: string; kind: NpcKind; name: string } | null>(null);
+  const updateInteractableRef = useRef<() => void>(() => {});
+  // The figure selected in the builder for quick settings (scene link)
+  const [selectedNpcId, setSelectedNpcId] = useState<string | null>(null);
+  const removePlacedNpcByIdRef = useRef<(id: string) => void>(() => {});
+
+  const runInteractRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    onExitRef.current = onExit;
+    runInteractRef.current = () => {
+      const t = interactTargetRef.current;
+      if (!t) return;
+      if (t.kind === 'enemy') {
+        showPortalHint('Kämpfen: kommt direkt nach dem Battle-Ersatz — hier gibt es (noch) nichts zu holen.');
+        return;
+      }
+      if (t.sceneId) {
+        onSceneStartRef.current?.(t.sceneId);
+        return;
+      }
+      showPortalHint('Diese Figur ist noch mit keiner Szene verknüpft — im Bauen-Modus die Figur anklicken.');
+    };
+  });
+
   const unlinkDoorRef = useRef<(doorId: string) => void>(() => {});
   useEffect(() => {
     askUnlinkRef.current = (doorId, label) => setUnlinkAsk({ doorId, label });
@@ -798,6 +872,21 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     setUnlinkAsk(null);
     if (ask && accepted) unlinkDoorRef.current(ask.doorId);
   };
+
+  // Phase 3 (builder): link a scene to the selected placed figure, or remove it
+  const selectedNpc = placedNpcs.find(p => p.id === selectedNpcId) ?? null;
+  const applyNpcScene = useCallback((npcId: string, sceneId: string | undefined) => {
+    const next = placedNpcsRef.current.map(p => (p.id === npcId ? { ...p, sceneId } : p));
+    placedNpcsRef.current = next;
+    setPlacedNpcs(next);
+    setItem(NPC_PLACEMENTS_KEY, next).catch(err => console.warn('npc scene save failed:', err));
+    if (interactTargetRef.current?.id === npcId) updateInteractableRef.current();
+  }, []);
+  const removeSelectedNpc = useCallback(() => {
+    if (!selectedNpcId) return;
+    removePlacedNpcByIdRef.current(selectedNpcId);
+    setSelectedNpcId(null);
+  }, [selectedNpcId]);
 
   // Phase 2: debounced write-back of the whole dungeon bundle to the bound
   // project (fires after init restore, on every persisted edit)
@@ -2983,6 +3072,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       }
       // From here on every edit flows into the project save-back
       restoredInitRef.current = true;
+      // Play mode: any figure standing next to the spawn tile is interactable
+      if (playModeRef.current) updateInteractableRef.current();
     };
 
     initCharacter();
@@ -3255,6 +3346,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       syncNpcGroup(next);
       setItem(NPC_PLACEMENTS_KEY, next).catch(err => console.warn('npc placement save failed:', err));
       playTactileSfx('click');
+    };
+    // Exposed for the quick settings panel (Phase 3)
+    removePlacedNpcByIdRef.current = (id: string) => {
+      const inst = placedNpcsRef.current.find(p => p.id === id);
+      if (inst) deletePlacedNpc(inst);
     };
 
     // Raycast against placed characters, resolves the owning instance
@@ -3539,6 +3635,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       if (editModeRef.current !== 'link') setLinkPickName(null);
       // Marker shells must follow the freshly visible section
       refreshLinkHighlightsRef.current?.();
+      // Play mode: refresh the interactable figure after any section spawn
+      updateInteractableRef.current();
     };
     focusSectionRef.current = focusSection;
     focusSection('root');
@@ -3878,6 +3976,17 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         return;
       }
 
+      // Builder only: click a placed character to open its quick settings
+      // (scene link). In play mode characters are never picked.
+      if (e.button === 0 && !playModeRef.current && !placementSceneRef.current && !editModeRef.current) {
+        const npcSelHit = findPlacedNpcAtEvent(e);
+        if (npcSelHit) {
+          setSelectedNpcId(prev => (prev === npcSelHit.inst.id ? null : npcSelHit.inst.id));
+          playTactileSfx('click');
+          return;
+        }
+      }
+
       // Click on a door of the active section: walk there and step through it
       if (e.button === 0 && !placementSceneRef.current && !editModeRef.current) {
         const hit = findPlacedChunkAtEvent(e);
@@ -4015,8 +4124,14 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       exitPlacement();
     };
 
-    // ESC while in Placement Mode: cancel. ESC also leaves any chunk edit mode
+    // ESC while in Placement Mode: cancel. ESC also leaves any chunk edit mode.
+    // Play mode: E interacts with the nearby figure
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (playModeRef.current && (e.key === 'e' || e.key === 'E') && interactTargetRef.current) {
+        e.preventDefault();
+        runInteractRef.current();
+        return;
+      }
       if (e.key !== 'Escape') return;
       exitPlacement();
       if (editModeRef.current) {
@@ -4026,6 +4141,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         renderer.domElement.style.cursor = 'default';
         playTactileSfx('hover');
       }
+      // Play mode: leave the dungeon back to the world map
+      if (playModeRef.current) onExitRef.current();
     };
 
     // End grab-pan when the button is released or the cursor leaves the canvas
@@ -4124,12 +4241,14 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
               setAnimState('IDLE');
               updateMovementAnimationRef.current(false);
               checkDoorArrival();
+              updateInteractableRef.current();
             }
           } else {
             targetWorldPosRef.current = null;
             setAnimState('IDLE');
             updateMovementAnimationRef.current(false);
             checkDoorArrival();
+            updateInteractableRef.current();
           }
         } else {
           const dirVec = new THREE.Vector3().subVectors(targetPos, currentPos).normalize();
@@ -4373,13 +4492,18 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         <button
           onClick={onExit}
           className="pointer-events-auto flex items-center gap-2 px-3.5 py-2 bg-gray-900/95 hover:bg-gray-800 text-gray-200 hover:text-white border border-gray-700/80 rounded-xl shadow-xl transition-all font-semibold text-xs group active:scale-95"
-          title="Zurück zum Editor Hauptmenü"
+          title={playMode ? 'Dungeon verlassen (auch ESC)' : 'Zurück zum Editor Hauptmenü'}
         >
           <ArrowLeft size={16} className="group-hover:-translate-x-1 transition-transform text-emerald-400" />
-          <span>Zurück zum Editor</span>
+          <span>
+            {playMode
+              ? `Weltkarte${dungeonProject ? ` — ${dungeonProject.name}` : ''}`
+              : 'Zurück zum Editor'}
+          </span>
         </button>
 
-        {/* Central 3-Asset Badges (Click to switch tab in dock) */}
+        {/* Central 3-Asset Badges (Click to switch tab in dock) — builder only */}
+        {!playMode && (
         <div className="pointer-events-auto hidden sm:flex items-center gap-2 px-3 py-1.5 bg-gray-900/90 border border-gray-800 rounded-2xl text-xs shadow-xl backdrop-blur-md">
           <button
             onClick={() => { setActiveTab('character'); setIsDockCollapsed(false); playTactileSfx('click'); }}
@@ -4447,6 +4571,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             </span>
           </button>
         </div>
+        )}
 
         {/* Right Status Pill */}
         <div className="pointer-events-auto flex items-center gap-2">
@@ -4522,7 +4647,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       )}
 
       {/* CHUNK EDIT TOOLBAR: sections, door links, move / delete placed copies */}
-      {!placementMode && (
+      {!placementMode && !playMode && (
         <div className="absolute inset-x-0 top-16 flex justify-center px-4 pointer-events-none z-20">
           <div className="pointer-events-auto bg-gray-900/95 backdrop-blur-md border border-gray-700/80 rounded-2xl px-3 py-2 shadow-2xl flex flex-wrap items-center gap-2 max-w-full">
             {editMode === 'link' ? (
@@ -4610,6 +4735,66 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         </div>
       )}
 
+      {/* PLAY MODE: interaction HUD (E — sprechen/kämpfen) */}
+      {playMode && interactTargetLabel && (
+        <div className="absolute bottom-7 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+          <div className="bg-gray-900/95 border border-cyan-500/50 rounded-xl px-4 py-2 shadow-2xl backdrop-blur-md flex items-center gap-3">
+            <kbd className="px-2.5 py-1 bg-cyan-600 text-white text-xs font-bold rounded-lg border border-cyan-300/60 shadow">
+              E
+            </kbd>
+            <span className="text-sm font-semibold text-white tracking-wide">
+              {interactTargetLabel.kind === 'enemy' ? 'Kämpfen' : 'Sprechen'} — {interactTargetLabel.name}
+            </span>
+            {interactTargetLabel.kind === 'enemy' && (
+              <span className="text-[10px] uppercase tracking-wider font-bold text-rose-300 bg-rose-950/70 border border-rose-700/60 px-1.5 py-0.5 rounded">
+                Gegner
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* BUILDER: quick settings for a clicked figure (link a scene / remove) */}
+      {!playMode && selectedNpc && (
+        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-30 pointer-events-auto">
+          <div className="bg-gray-900/95 backdrop-blur-md border border-cyan-500/50 rounded-2xl px-3.5 py-3 shadow-2xl flex items-center gap-3 max-w-[92vw]">
+            <div className="flex items-center gap-2 min-w-0">
+              <span style={{ color: selectedNpc.kind === 'enemy' ? '#fb7185' : '#38bdf8' }}>●</span>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white truncate max-w-[180px]">
+                  {characters.find(c => c.id === selectedNpc.characterId)?.name ?? npcLibrary.find(e => e.id === selectedNpc.libraryId)?.fileName ?? 'Figur'}
+                </div>
+                <div className="text-[10px] uppercase tracking-wider text-gray-500 font-bold">
+                  {selectedNpc.kind === 'enemy' ? 'Gegner' : 'Neutraler Charakter'}
+                </div>
+              </div>
+            </div>
+            <select
+              value={selectedNpc.sceneId ?? ''}
+              onChange={(e) => applyNpcScene(selectedNpc.id, e.target.value || undefined)}
+              className="px-2 py-1.5 text-xs font-semibold rounded-lg border bg-gray-800 text-gray-200 border-gray-700 max-w-[220px]"
+              title="Szene, die im Spiel-Modus mit E geöffnet wird"
+            >
+              <option value="">— Keine Szene (E: leer) —</option>
+              {scenes.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <button
+              onClick={removeSelectedNpc}
+              className="px-2.5 py-1.5 bg-rose-950/70 hover:bg-rose-800 text-rose-200 border border-rose-700/60 rounded-lg text-xs font-semibold transition-colors"
+              title="Figur entfernen"
+            >
+              <Trash2 size={13} />
+            </button>
+            <button
+              onClick={() => setSelectedNpcId(null)}
+              className="px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 rounded-lg text-xs font-semibold transition-colors"
+            >
+              Schließen
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* TRANSIENT HINT PILL (e.g. door leads nowhere) */}
       {portalHint && (
         <div className="absolute inset-x-0 top-28 flex justify-center px-4 pointer-events-none z-30">
@@ -4642,7 +4827,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         </div>
       )}
 
-      {/* UNIFIED COLLAPSIBLE BOTTOM DOCK */}
+      {/* UNIFIED COLLAPSIBLE BOTTOM DOCK — builder only */}
+      {!playMode && (
       <div
         className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 transition-all duration-300 ease-out flex flex-col items-center"
         style={{ width: 'min(980px, 95vw)' }}
@@ -6005,6 +6191,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           </div>
         )}
       </div>
+      )}
     </div>
   );
 };
