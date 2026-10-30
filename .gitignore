@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Default project bundle: multi-GB ZIP -> hosted as a GitHub release asset,
+# local dev copy stays out of git (>100 MB files are rejected by GitHub)
+public/default-project/*.zip

@@ -124,6 +124,13 @@ const DEFAULT_MAPS: WorldMap[] = [
 ];
 
 const DEFAULT_BATTLES: Battle[] = [];
+
+// Default project (your real game content) — imported automatically on the
+// very first start of a fresh browser profile. The ZIP (>100 MB) can't live
+// in normal git, so it's hosted as a GitHub release asset with a stable URL.
+// Local dev keeps a copy in public/default-project/ (gitignored).
+const DEFAULT_PROJECT_RELEASE_URL = 'https://github.com/TetrisStone/VN-Generator-AI-Studio_v3/releases/download/default-project/vn-project-default.zip';
+const DEFAULT_PROJECT_LOCAL = 'default-project/vn-project-default.zip';
 const DEFAULT_WORLD: WorldInfo = { 
     description: "A cyberpunk city ruled by corporations. Humans and androids live together but tensions are high.",
     factions: [
@@ -286,6 +293,32 @@ const App: React.FC = () => {
                     data = legacyData || JSON.parse(lsProject!);
                     hasData = true;
                 } catch (e) {}
+            }
+        }
+
+        // First start on a fresh browser: pull the bundled default project
+        // (local dev copy first, then the repo release asset) once and
+        // import it — afterwards the data lives in IndexedDB like any own import
+        if (!hasData) {
+            try {
+                let defaultFile: File | null = null;
+                let resp = await fetch(DEFAULT_PROJECT_LOCAL, { cache: 'no-store' });
+                if (!resp.ok) resp = await fetch(DEFAULT_PROJECT_RELEASE_URL, { cache: 'no-store' });
+                if (resp.ok) {
+                    const blob = await resp.blob();
+                    if (blob.size > 0) {
+                        defaultFile = new File([blob], 'vn-project-default.zip', { type: 'application/zip' });
+                    }
+                } else {
+                    console.warn('Default project ZIP not reachable (relies on release asset; HTTP ' + resp.status + '). Falling back to built-in demo.');
+                }
+                if (defaultFile) {
+                    console.log('First start: importing default project bundle...');
+                    await handleImportProject(defaultFile, { silent: true });
+                    return;
+                }
+            } catch (e) {
+                console.warn('Default project auto-import failed:', e);
             }
         }
 
@@ -517,7 +550,7 @@ const App: React.FC = () => {
       reader.readAsText(file);
   };
 
-  const handleImportProject = async (file: File) => {
+  const handleImportProject = async (file: File, opts?: { silent?: boolean }) => {
     setIsProcessing(true);
     try {
       let data: any = null;
@@ -699,7 +732,8 @@ const App: React.FC = () => {
       await setProjectItem('dungeons', data.dungeonProjects || []);
       await setProjectItem('assets', data.assets || []);
       
-      alert("Project loaded successfully!");
+      if (opts?.silent) console.log('Default project imported successfully');
+      else alert("Project loaded successfully!");
     } catch (error) {
       console.error("Import failed", error);
       alert("Failed to load project file.");
