@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Play, BookOpen, Settings as SettingsIcon, Castle, ChevronLeft, ChevronRight, ImagePlus, Trash2, ChevronDown, Feather } from 'lucide-react';
+import { Play, BookOpen, Settings as SettingsIcon, Castle, ChevronLeft, ChevronRight, ImagePlus, Trash2, ChevronDown, Feather, Plus } from 'lucide-react';
 import { ProjectMeta } from '../types';
 import { useI18n, TKey } from '../utils/i18n';
 import { saveImage, deleteImage } from '../utils/imageStorage';
@@ -23,6 +23,10 @@ interface HomeViewProps {
   projects?: ProjectSummary[];
   activeProjectId?: string;
   onSelectProject?: (id: string) => void;
+  onCreateProject?: () => void;
+  onDeleteProject?: () => void;
+  /** Last change of the open project (from the project registry) */
+  lastEdited?: number;
 }
 
 const GENRES: [string, TKey][] = [
@@ -60,7 +64,7 @@ const SelectField: React.FC<{ value?: string; options: [string, TKey][]; onChang
   );
 };
 
-export const HomeView: React.FC<HomeViewProps> = ({ meta, onUpdateMeta, hasSaveGame, onPlay, onContinue, onOpenSettings, projects, activeProjectId, onSelectProject }) => {
+export const HomeView: React.FC<HomeViewProps> = ({ meta, onUpdateMeta, hasSaveGame, onPlay, onContinue, onOpenSettings, projects, activeProjectId, onSelectProject, onCreateProject, onDeleteProject, lastEdited }) => {
   const { t, lang } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
   const coverSrc = useStoredImage(meta.coverImageId);
@@ -73,7 +77,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ meta, onUpdateMeta, hasSaveG
     onSelectProject(list[(activeIdx + delta + list.length) % list.length].id);
   };
 
-  const update = (patch: Partial<ProjectMeta>) => onUpdateMeta({ ...meta, ...patch, lastEdited: Date.now() });
+  const update = (patch: Partial<ProjectMeta>) => onUpdateMeta({ ...meta, ...patch });
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -101,8 +105,9 @@ export const HomeView: React.FC<HomeViewProps> = ({ meta, onUpdateMeta, hasSaveG
     if (old) deleteImage(old).catch(() => {});
   };
 
-  const edited = meta.lastEdited
-    ? new Date(meta.lastEdited).toLocaleString(lang === 'de' ? 'de-DE' : 'en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  const editedAt = lastEdited ?? meta.lastEdited;
+  const edited = editedAt
+    ? new Date(editedAt).toLocaleString(lang === 'de' ? 'de-DE' : 'en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
     : t('home.never');
 
   const openPicker = () => fileRef.current?.click();
@@ -224,7 +229,12 @@ export const HomeView: React.FC<HomeViewProps> = ({ meta, onUpdateMeta, hasSaveG
               ))}
             </div>
             <div className="vn-font-display text-[0.7rem] tracking-[0.15em] uppercase text-[#2b2113] mt-3 text-center truncate max-w-full">{title}</div>
-            <p className="text-xs text-[#7a6540] mt-1 text-center vn-font-serif text-sm">{t('home.image.hint')}</p>
+            {list.length > 1 && <div className="vn-font-serif text-sm text-[#7a6540]">{activeIdx + 1} / {list.length}</div>}
+            <div className="flex items-center gap-2 mt-3">
+              <button type="button" className="vn-mini-btn" onClick={onCreateProject} disabled={!onCreateProject}><Plus size={12} />{t('project.new')}</button>
+              <button type="button" className="vn-mini-btn vn-mini-btn--danger" onClick={onDeleteProject} disabled={!onDeleteProject}><Trash2 size={12} />{t('project.delete')}</button>
+            </div>
+            <p className="text-xs text-[#7a6540] mt-2 text-center vn-font-serif text-sm">{t('home.image.hint')}</p>
 
             <div className="mt-5 flex items-center gap-3 rounded px-4 py-3 w-full max-w-[360px]" style={{ background: 'linear-gradient(180deg,#3a2a1a,#241a10)', boxShadow: 'inset 0 0 0 1px rgba(201,164,92,.35)' }}>
               <div className="vn-seal"><Feather size={20} /></div>

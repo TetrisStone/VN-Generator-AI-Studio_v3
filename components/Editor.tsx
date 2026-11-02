@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { EditorTab, ProjectMeta, Character, CharacterImportance, CharacterAlignment, Scene, WorldMap, Battle, WorldInfo, Chapter, SceneEffect, MapSpot, WorldLocation, Faction, RelationshipTrigger, RelationshipThreshold, StoryLogEntry, AssetItem, DungeonProject, DungeonSection, DungeonBaseGLB, DungeonChunkLibraryEntry, DungeonChunkPlacement, DungeonNpcLibraryEntry, DungeonNpcPlacement, DungeonChunkType, DungeonNpcKind } from '../types';
 import { Button } from './ui/Button';
 import { Sidebar } from './layout/Sidebar';
-import { HomeView } from './HomeView';
+import { HomeView, ProjectSummary } from './HomeView';
 import { SettingsView } from './SettingsView';
 import { Trash, Sword, Scaling, Plus, Save, Play, Download, Upload, Monitor, Map as MapIcon, Users, Target, Book, Layout, MessageSquare, Unlock, Lock, Waypoints, Image as ImageIcon, XCircle, Terminal, MapPin, Heart, EyeOff, Video, Music, Sparkles, Loader2, ArrowLeft, Cpu, Check, FolderOpen, ChevronUp, ChevronDown, ExternalLink, X, Move, ChevronLeft, ChevronRight, Search, Compass, Boxes } from 'lucide-react';
 import { CHARACTER_GROUPS, getCharacterGroupKey, getCharacterGroup, CharacterGroupKey } from '../utils/characterUtils';
@@ -2448,6 +2448,13 @@ interface EditorProps {
   onBuildDungeon?: (id: string) => void;
   /** Tab the editor opens on (e.g. returning from the dungeon builder) */
   initialTab?: EditorTab;
+  /** Multi-project (emblem switcher on Home) */
+  projects?: ProjectSummary[];
+  activeProjectId?: string;
+  lastEdited?: number;
+  onSelectProject?: (id: string) => void;
+  onCreateProject?: () => void;
+  onDeleteProject?: () => void;
 }
 
 export type { EditorTab };
@@ -2630,6 +2637,12 @@ export const Editor: React.FC<EditorProps> = (props) => {
                         onPlay={props.onPlay}
                         onContinue={props.onContinueGame}
                         onOpenSettings={() => { setTab('settings'); setSelectedId(null); }}
+                        projects={props.projects}
+                        activeProjectId={props.activeProjectId}
+                        lastEdited={props.lastEdited}
+                        onSelectProject={props.onSelectProject}
+                        onCreateProject={props.onCreateProject}
+                        onDeleteProject={props.onDeleteProject}
                     />
                 )}
                 {tab === 'settings' && (

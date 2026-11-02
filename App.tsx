@@ -11,8 +11,14 @@ import { DungeonTestView } from './components/DungeonTestView';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { audioManager } from './utils/audioManager';
 import { Character, Scene, GameSaveData, RPGState, WorldMap, ChatMessage, Battle, WorldInfo, Chapter, StoryLogEntry, AssetItem, DungeonProject } from './types';
-import { getItem, setItem, getProjectItem, setProjectItem } from './utils/db';
-import { loadImage, saveImage } from './utils/imageStorage';
+import { getItem, setItem } from './utils/db';
+import { loadImage, saveImage, listImageIds } from './utils/imageStorage';
+import {
+  LEGACY_PROJECT_ID, ProjectData, ProjectRegistry, saveGameKey, loadRegistry, saveRegistry, createEntry,
+  loadProjectFields, saveProjectFields, deleteProjectFields, hasProjectData, collectMediaRefs, mediaRefsOf, pruneUnusedMedia
+} from './utils/projects';
+import { Dialog } from './components/ui/Dialog';
+import { useI18n, translate } from './utils/i18n';
 import JSZip from 'jszip';
 import { generateSceneSummary } from './services/geminiService';
 import { Loader2 } from 'lucide-react';
@@ -59,7 +65,6 @@ const DEFAULT_WORLD: WorldInfo = {
 };
 
 const PROJECT_STORAGE_KEY = 'vn_creator_project';
-const GAME_SAVE_KEY = 'vn_creator_savegame';
 
 function uint8ArrayToBase64DataURLAsync(arr: Uint8Array, mimeType: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -124,6 +129,26 @@ const App: React.FC = () => {
   const [vnHistory, setVnHistory] = useState<ChatMessage[]>([]); 
 
   const [hasSaveGame, setHasSaveGame] = useState(false);
+
+  // Multi-project state
+  const { t } = useI18n();
+  const [registry, setRegistry] = useState<ProjectRegistry | null>(null);
+  const [activeProjectId, setActiveProjectId] = useState<string>(LEGACY_PROJECT_ID);
+  const [isReady, setIsReady] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const registryRef = useRef<ProjectRegistry | null>(null);
+  const activeIdRef = useRef<string>(LEGACY_PROJECT_ID);
+  const readyRef = useRef(false);
+  const busyRef = useRef(false);
+  const initStartedRef = useRef(false);
+  const touchRef = useRef(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPruneRef = useRef<Set<string>>(new Set());
+  const prevCoverRef = useRef<{ id: string; cover: string | null } | null>(null);
+  const appliedRef = useRef<any>(null);
+  const stateRef = useRef<any>({});
+  const modeRef = useRef<string>('edit');
   
   // New States for Journal and Loading
   const [showJournal, setShowJournal] = useState(false);
@@ -133,6 +158,10 @@ const App: React.FC = () => {
   // Background Music State
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [currentBgmUrl, setCurrentBgmUrl] = useState<string | undefined>(undefined);
+
+  // Always-current snapshot for async persistence code
+  stateRef.current = { worldInfo, chapters, characters, scenes, maps, battles, assets, dungeonProjects };
+  modeRef.current = mode;
 
   // Background Music Volume Sync
   useEffect(() => {
@@ -148,174 +177,308 @@ const App: React.FC = () => {
     return () => window.removeEventListener('bgmVolumeChanged', handleVolumeChange);
   }, []);
 
-  // Check for save game on mount and migrate from LocalStorage if needed
+  // ---------------------------------------------------------------------------
+  // Multi-project persistence
+  // ---------------------------------------------------------------------------
+  const normalizeData = (data: ProjectData): Required<Pick<ProjectData, 'chapters' | 'characters' | 'scenes' | 'battles' | 'maps' | 'assets' | 'dungeonProjects'>> & { worldInfo: WorldInfo } => {
+    const w = data.worldInfo || {};
+    const worldInfo: WorldInfo = {
+      ...DEFAULT_WORLD,
+      ...w,
+      description: w.description || '',
+      factions: w.factions || [],
+      loreLocations: w.loreLocations || [],
+      diceConfig: w.diceConfig || { skins: {} },
+      systemInstruction: w.systemInstruction || '',
+      llmProvider: w.llmProvider || 'gemini',
+      llmModel: w.llmModel || 'gemini-3.5-flash',
+      ollamaUrl: w.ollamaUrl || 'http://localhost:11434',
+      ollamaNumCtx: w.ollamaNumCtx ?? 8192,
+      ollamaTemperature: w.ollamaTemperature ?? 0.8,
+      ollamaRepeatPenalty: w.ollamaRepeatPenalty ?? 1.1,
+      openaiApiKey: w.openaiApiKey ?? '',
+      openaiBaseUrl: w.openaiBaseUrl ?? 'https://openrouter.ai/api/v1',
+      openaiModel: w.openaiModel ?? '',
+      comfyUrl: w.comfyUrl || 'http://127.0.0.1:8188',
+      comfyEnabled: !!w.comfyEnabled,
+      comfyWorkflow: w.comfyWorkflow || ''
+    };
+
+    const chapters: Chapter[] = data.chapters && data.chapters.length > 0
+      ? data.chapters.map((c: any, index: number) => ({ ...c, order: c.order ?? index + 1 }))
+      : structuredClone(DEFAULT_CHAPTERS);
+    const firstChapterId = chapters[0].id;
+
+    const scenes: Scene[] = (data.scenes || []).map((s: any, index: number) => ({
+      ...s,
+      chapterId: s.chapterId || firstChapterId,
+      order: s.order ?? index + 1,
+      isMainScene: s.isMainScene ?? true,
+      effects: s.effects || s.unlocks || [],
+      isRepeatable: s.isRepeatable || false,
+      locationName: s.locationName || s.name || 'Unknown Location',
+      aiInstructions: s.aiInstructions || '',
+      sensoryDetails: s.sensoryDetails || '',
+      environmentDetails: s.environmentDetails || '',
+      relevantFactionIds: s.relevantFactionIds ?? undefined,
+      relevantLocationIds: s.relevantLocationIds ?? undefined,
+    }));
+
+    const battles: Battle[] = (data.battles || []).map((b: any) => ({ ...b, chapterId: b.chapterId || firstChapterId }));
+
+    let maps: WorldMap[];
+    if (data.maps && data.maps.length > 0) maps = data.maps;
+    else if (data.mapConfig) maps = [{ ...data.mapConfig, id: 'map1', name: 'Default Map' }];
+    else maps = structuredClone(DEFAULT_MAPS);
+
+    return {
+      worldInfo,
+      chapters,
+      characters: data.characters || [],
+      scenes,
+      battles,
+      maps,
+      assets: data.assets || [],
+      dungeonProjects: data.dungeonProjects || [],
+    };
+  };
+
+  /** Puts a normalized project into React state (and remembers it as the "unchanged" snapshot for autosave) */
+  const applyData = (norm: ReturnType<typeof normalizeData>, savedGame: GameSaveData | null) => {
+    const characters = savedGame?.characterState
+      ? norm.characters.map(c => {
+          const st = savedGame.characterState?.[c.id];
+          return st ? { ...c, ...st } : c;
+        })
+      : norm.characters;
+    const snapshot = { ...norm, characters };
+    appliedRef.current = snapshot;
+    stateRef.current = snapshot;
+    prevCoverRef.current = { id: activeIdRef.current, cover: norm.worldInfo.projectMeta?.coverImageId ?? null };
+    setWorldInfo(snapshot.worldInfo);
+    setChapters(snapshot.chapters);
+    setCharacters(snapshot.characters);
+    setScenes(snapshot.scenes);
+    setMaps(snapshot.maps);
+    setBattles(snapshot.battles);
+    setAssets(snapshot.assets);
+    setDungeonProjects(snapshot.dungeonProjects);
+    // leave any running game session behind
+    setRpgState({
+      currentMapId: snapshot.maps[0]?.id || 'map1',
+      completedSceneIds: [], completedBattleIds: [], unlockedIds: [], hiddenIds: [], ongoingScenes: {}, storyLog: []
+    });
+    setVnHistory([]);
+    setActiveSceneIndex(-1);
+    setActiveBattleId(null);
+    setMode('edit');
+  };
+
+  const updateRegistry = async (fn: (reg: ProjectRegistry) => ProjectRegistry) => {
+    const next = fn(registryRef.current!);
+    registryRef.current = next;
+    setRegistry(next);
+    await saveRegistry(next);
+  };
+
+  /** Persists the open project right now (debounced autosave and all project switches go through here) */
+  const flushSave = async () => {
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+    if (!readyRef.current || !registryRef.current) return;
+    const id = activeIdRef.current;
+    const d = stateRef.current;
+    const touch = touchRef.current;
+    touchRef.current = false;
+    await saveProjectFields(id, d);
+    const meta = d.worldInfo?.projectMeta;
+    await updateRegistry(reg => ({
+      ...reg,
+      projects: reg.projects.map(p => p.id === id
+        ? { ...p, title: meta?.title ?? '', coverImageId: meta?.coverImageId ?? null, updatedAt: touch ? Date.now() : p.updatedAt }
+        : p),
+    }));
+    if (pendingPruneRef.current.size > 0) {
+      const candidates = pendingPruneRef.current;
+      pendingPruneRef.current = new Set();
+      await pruneUnusedMedia(candidates);
+    }
+  };
+
+  const loadIntoState = async (id: string) => {
+    const data = await loadProjectFields(id);
+    const savedGame = await getItem<GameSaveData>(saveGameKey(id));
+    activeIdRef.current = id;
+    setActiveProjectId(id);
+    applyData(normalizeData(data), savedGame || null);
+    setHasSaveGame(!!savedGame);
+    setEditorInitialTab('home');
+  };
+
+  /** Runs a project switch/create/delete with autosave paused so nothing is written into the wrong project */
+  const transition = async (fn: () => Promise<void>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      await flushSave();
+      readyRef.current = false;
+      await fn();
+    } catch (e) {
+      console.error('Project operation failed', e);
+    } finally {
+      readyRef.current = true;
+      busyRef.current = false;
+    }
+  };
+
+  const handleSelectProject = (id: string) => {
+    if (id === activeIdRef.current) return;
+    transition(async () => {
+      await loadIntoState(id);
+      await updateRegistry(reg => ({ ...reg, activeId: id }));
+    });
+  };
+
+  const handleCreateProject = () => {
+    transition(async () => {
+      const id = crypto.randomUUID();
+      const norm = normalizeData({});
+      await saveProjectFields(id, norm);
+      await updateRegistry(reg => ({ activeId: id, projects: [...reg.projects, createEntry(id)] }));
+      activeIdRef.current = id;
+      setActiveProjectId(id);
+      applyData(norm, null);
+      setHasSaveGame(false);
+      setEditorInitialTab('home');
+    });
+  };
+
+  const handleDeleteProject = () => {
+    setShowDeleteDialog(false);
+    transition(async () => {
+      const id = activeIdRef.current;
+      const reg = registryRef.current!;
+      const known = new Set(await listImageIds());
+      const refs = collectMediaRefs(stateRef.current, known);
+      const idx = reg.projects.findIndex(p => p.id === id);
+      await deleteProjectFields(id);
+      const remaining = reg.projects.filter(p => p.id !== id);
+      if (remaining.length > 0) {
+        const next = remaining[Math.min(idx, remaining.length - 1)];
+        await updateRegistry(() => ({ activeId: next.id, projects: remaining }));
+        await loadIntoState(next.id);
+      } else {
+        // last project deleted: start over with an empty one
+        const newId = crypto.randomUUID();
+        const norm = normalizeData({});
+        await saveProjectFields(newId, norm);
+        await updateRegistry(() => ({ activeId: newId, projects: [createEntry(newId)] }));
+        activeIdRef.current = newId;
+        setActiveProjectId(newId);
+        applyData(norm, null);
+        setHasSaveGame(false);
+        setEditorInitialTab('home');
+      }
+      await pruneUnusedMedia(refs);
+    });
+  };
+
+  // Load registry + active project on mount (legacy single-project data becomes project "main")
   useEffect(() => {
+    if (initStartedRef.current) return;
+    initStartedRef.current = true;
     const initLoad = async () => {
-        // 1. Check for Save Game
-        const savedGame = await getItem<GameSaveData>(GAME_SAVE_KEY);
-        if (savedGame) {
-            setHasSaveGame(true);
-            
-            // If saved game has updated character states (relationships), load them into session
-            if (savedGame.characterState) {
-                setCharacters(prevChars => prevChars.map(c => {
-                    const savedState = savedGame.characterState?.[c.id];
-                    if (savedState) return { ...c, ...savedState };
-                    return c;
-                }));
-            }
-        }
-        
-        // 2. Load Project Data
-        let hasData = false;
-        let data: any = {};
-        
-        try {
-            data.worldInfo = await getProjectItem('worldInfo');
-            data.chapters = await getProjectItem('chapters');
-            data.characters = await getProjectItem('characters');
-            data.scenes = await getProjectItem('scenes');
-            data.battles = await getProjectItem('battles');
-            data.maps = await getProjectItem('maps');
-            data.assets = await getProjectItem('assets');
-            data.dungeonProjects = await getProjectItem('dungeons');
-            
-            if (data.worldInfo || data.chapters || data.characters || data.scenes || data.assets) {
-                hasData = true;
-            }
-        } catch (e) {
-            console.error("IDB load project error", e);
-        }
+        let reg = await loadRegistry();
+        let id: string;
+        let data: ProjectData = {};
 
-        if (!hasData) {
-            const lsProject = localStorage.getItem(PROJECT_STORAGE_KEY);
-            let legacyData = await getItem(PROJECT_STORAGE_KEY); // check old keyval store too
-            if (lsProject || legacyData) {
-                try {
-                    data = legacyData || JSON.parse(lsProject!);
-                    hasData = true;
-                } catch (e) {}
+        if (reg) {
+            id = reg.projects.some(p => p.id === reg!.activeId) ? reg.activeId : reg.projects[0].id;
+            data = await loadProjectFields(id);
+        } else {
+            // First start with multi-project support: adopt whatever the single-project version stored
+            id = LEGACY_PROJECT_ID;
+            try {
+                data = await loadProjectFields(id);
+            } catch (e) {
+                console.error("IDB load project error", e);
+            }
+            if (!hasProjectData(data)) {
+                const lsProject = localStorage.getItem(PROJECT_STORAGE_KEY);
+                const legacyData = await getItem<ProjectData>(PROJECT_STORAGE_KEY); // old keyval store
+                if (lsProject || legacyData) {
+                    try { data = legacyData || JSON.parse(lsProject!); } catch (e) {}
+                }
             }
         }
 
-        // Fresh browser: start with an empty project (no demo content, no auto-import)
-
-        // Apply Data
-        if (data) {
-            // Check for media migration
-            const migrated = await getItem('mediaExtracted');
-            if (!migrated) {
-                console.log("Running media extraction migration...");
+        // Media extraction migration (old projects embedded base64 data)
+        const migrated = await getItem('mediaExtracted');
+        if (!migrated) {
+            if (hasProjectData(data)) {
                 setIsProcessing(true);
                 try {
-                    // Create backup
                     await setItem(`project_backup_${Date.now()}`, data);
-                    
                     data = await extractImagesFromProject(data);
-                    await setItem('mediaExtracted', true);
-                    
-                    // Persist migrated data to IDB immediately
-                    await setProjectItem('worldInfo', data.worldInfo);
-                    await setProjectItem('chapters', data.chapters);
-                    await setProjectItem('characters', data.characters);
-                    await setProjectItem('scenes', data.scenes);
-                    await setProjectItem('battles', data.battles);
-                    await setProjectItem('maps', data.maps);
-                    
+                    await saveProjectFields(id, data);
                 } catch (e) {
                     console.error("Migration failed", e);
                 } finally {
                     setIsProcessing(false);
                 }
             }
-
-            if (data.worldInfo) {
-                // Migration & Loading: Ensure all model settings and lore fields exist
-                setWorldInfo({
-                    ...DEFAULT_WORLD,
-                    ...data.worldInfo,
-                    description: data.worldInfo.description || '',
-                    factions: data.worldInfo.factions || [],
-                    loreLocations: data.worldInfo.loreLocations || [],
-                    diceConfig: data.worldInfo.diceConfig || { skins: {} },
-                    systemInstruction: data.worldInfo.systemInstruction || '',
-                    llmProvider: data.worldInfo.llmProvider || 'gemini',
-                    llmModel: data.worldInfo.llmModel || 'gemini-3.5-flash',
-                    ollamaUrl: data.worldInfo.ollamaUrl || 'http://localhost:11434',
-                    ollamaNumCtx: data.worldInfo.ollamaNumCtx ?? 8192,
-                    ollamaTemperature: data.worldInfo.ollamaTemperature ?? 0.8,
-                    ollamaRepeatPenalty: data.worldInfo.ollamaRepeatPenalty ?? 1.1,
-                    openaiApiKey: data.worldInfo.openaiApiKey ?? '',
-                    openaiBaseUrl: data.worldInfo.openaiBaseUrl ?? 'https://openrouter.ai/api/v1',
-                    openaiModel: data.worldInfo.openaiModel ?? '',
-                    comfyUrl: data.worldInfo.comfyUrl || 'http://127.0.0.1:8188',
-                    comfyEnabled: !!data.worldInfo.comfyEnabled,
-                    comfyWorkflow: data.worldInfo.comfyWorkflow || ''
-                });
-            }
-
-            if (data.chapters) {
-                const migratedChapters = data.chapters.map((c: any, index: number) => ({
-                    ...c,
-                    order: c.order ?? index + 1
-                }));
-                setChapters(migratedChapters);
-            } else {
-                // Ensure at least one chapter exists for migration
-                setChapters(DEFAULT_CHAPTERS);
-            }
-
-            if (data.characters) setCharacters(data.characters);
-            
-            // Migration logic
-            if (data.scenes) {
-                const migratedScenes = data.scenes.map((s: any, index: number) => ({
-                    ...s,
-                    // If scene doesn't have a chapter, assign to first available chapter
-                    chapterId: s.chapterId || DEFAULT_CHAPTERS[0].id,
-                    order: s.order ?? index + 1,
-                    isMainScene: s.isMainScene ?? true,
-                    effects: s.effects || s.unlocks || [],
-                    isRepeatable: s.isRepeatable || false,
-                    locationName: s.locationName || s.name || 'Unknown Location',
-                    aiInstructions: s.aiInstructions || '',
-                    sensoryDetails: s.sensoryDetails || '',
-                    environmentDetails: s.environmentDetails || '',
-                    relevantFactionIds: s.relevantFactionIds ?? undefined,
-                    relevantLocationIds: s.relevantLocationIds ?? undefined,
-                }));
-                setScenes(migratedScenes);
-            }
-
-            if (data.battles) {
-                const migratedBattles = data.battles.map((b: any) => ({
-                    ...b,
-                    chapterId: b.chapterId || DEFAULT_CHAPTERS[0].id
-                }));
-                setBattles(migratedBattles);
-            }
-
-            if (data.maps) setMaps(data.maps);
-            else if (data.mapConfig) setMaps([{ ...data.mapConfig, id: 'map1', name: 'Default Map' }]);
-
-            if (data.assets) setAssets(data.assets);
-
-            if (data.dungeonProjects) setDungeonProjects(data.dungeonProjects);
+            await setItem('mediaExtracted', true);
         }
+
+        const norm = normalizeData(data);
+        if (!reg) {
+            const entry = createEntry(id, norm.worldInfo.projectMeta?.title ?? '');
+            entry.coverImageId = norm.worldInfo.projectMeta?.coverImageId ?? null;
+            if (norm.worldInfo.projectMeta?.lastEdited) entry.updatedAt = norm.worldInfo.projectMeta.lastEdited;
+            reg = { activeId: id, projects: [entry] };
+            await saveRegistry(reg);
+        }
+        registryRef.current = reg;
+        setRegistry(reg);
+
+        const savedGame = await getItem<GameSaveData>(saveGameKey(id));
+        activeIdRef.current = id;
+        setActiveProjectId(id);
+        applyData(norm, savedGame || null);
+        setHasSaveGame(!!savedGame);
+        readyRef.current = true;
+        setIsReady(true);
     };
-    initLoad();
+    initLoad().catch(e => console.error('Init failed', e));
+  }, []);
+
+  // Autosave (debounced) whenever project data changes
+  useEffect(() => {
+    if (!readyRef.current) return;
+    const s = stateRef.current;
+    const a = appliedRef.current;
+    if (a && a.worldInfo === s.worldInfo && a.chapters === s.chapters && a.characters === s.characters && a.scenes === s.scenes
+        && a.maps === s.maps && a.battles === s.battles && a.assets === s.assets && a.dungeonProjects === s.dungeonProjects) return;
+    const cover = s.worldInfo?.projectMeta?.coverImageId ?? null;
+    const prev = prevCoverRef.current;
+    if (prev && prev.id === activeIdRef.current && prev.cover && prev.cover !== cover) pendingPruneRef.current.add(prev.cover);
+    prevCoverRef.current = { id: activeIdRef.current, cover };
+    if (modeRef.current === 'edit') touchRef.current = true;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => { flushSave().catch(console.error); }, 500);
+  }, [worldInfo, chapters, characters, scenes, maps, battles, assets, dungeonProjects]);
+
+  // Don't lose the last edits when the tab is hidden or closed
+  useEffect(() => {
+    const flush = () => { flushSave().catch(() => {}); };
+    const onVis = () => { if (document.visibilityState === 'hidden') flush(); };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVis);
+    return () => { window.removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', onVis); };
   }, []);
 
   const handleQuickSave = async () => {
-    const data = { worldInfo, chapters, characters, scenes, maps, battles, dungeonProjects, assets };
-    await setProjectItem('worldInfo', data.worldInfo);
-    await setProjectItem('chapters', data.chapters);
-    await setProjectItem('characters', data.characters);
-    await setProjectItem('scenes', data.scenes);
-    await setProjectItem('battles', data.battles);
-    await setProjectItem('maps', data.maps);
-    await setProjectItem('dungeons', data.dungeonProjects);
-    await setProjectItem('assets', data.assets);
+    touchRef.current = true;
+    await flushSave();
     return true;
   };
 
@@ -323,6 +486,8 @@ const App: React.FC = () => {
     setIsProcessing(true);
     try {
       const data = { worldInfo, chapters, characters, scenes, maps, battles, dungeonProjects, assets };
+      // Only media that this project actually references (the shared store may hold other projects' files)
+      const ownMedia = await mediaRefsOf(data);
       
       const zip = new JSZip();
       zip.file("project.json", JSON.stringify(data, null, 2));
@@ -334,8 +499,7 @@ const App: React.FC = () => {
         const audioFolder = zip.folder("audio");
 
         if (imagesFolder && videosFolder && audioFolder) {
-          const { listImageIds } = await import('./utils/imageStorage');
-          const imageIds = await listImageIds();
+          const imageIds = Array.from(ownMedia);
           
           for (const id of imageIds) {
             const base64 = await loadImage(id);
@@ -375,7 +539,8 @@ const App: React.FC = () => {
       const link = document.createElement('a');
       link.href = href;
       const mediaSuffix = includeMedia ? "" : "-light";
-      link.download = `vn-project-${new Date().toISOString().slice(0,10)}${mediaSuffix}.zip`;
+      const slug = (worldInfo.projectMeta?.title || '').trim().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'project';
+      link.download = `vn-${slug}-${new Date().toISOString().slice(0,10)}${mediaSuffix}.zip`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -389,7 +554,7 @@ const App: React.FC = () => {
   };
 
   const handleExportSave = async () => {
-      const savedGame = await getItem<GameSaveData>(GAME_SAVE_KEY);
+      const savedGame = await getItem<GameSaveData>(saveGameKey(activeIdRef.current));
       if (!savedGame) {
           alert("No save game found!");
           return;
@@ -414,7 +579,7 @@ const App: React.FC = () => {
             const content = e.target?.result as string;
             const data = JSON.parse(content) as GameSaveData;
             if (data.rpgState) {
-                await setItem(GAME_SAVE_KEY, data);
+                await setItem(saveGameKey(activeIdRef.current), data);
                 setHasSaveGame(true);
                 alert("Save Game imported successfully! Click 'Continue' to play.");
             } else {
@@ -428,9 +593,7 @@ const App: React.FC = () => {
       reader.readAsText(file);
   };
 
-  const handleImportProject = async (file: File, opts?: { silent?: boolean }) => {
-    setIsProcessing(true);
-    try {
+  const parseProjectFile = async (file: File): Promise<any> => {
       let data: any = null;
 
       if (file.name.endsWith('.zip')) {
@@ -524,101 +687,63 @@ const App: React.FC = () => {
         });
         data = JSON.parse(content);
       }
-      
-      console.log("Running media extraction migration on imported project...");
-      data = await extractImagesFromProject(data);
-      // Let's also ensure mediaExtracted gets set so initLoad doesn't re-run it
+    return data;
+  };
+
+  /** Writes a normalized project into the active project (replace) or into a brand-new one */
+  const runImport = async (file: File, mode: 'replace' | 'new') => {
+    setIsProcessing(true);
+    try {
+      await flushSave();
+    } catch (e) { console.error(e); }
+    readyRef.current = false;
+    try {
+      let raw = await parseProjectFile(file);
+      raw = await extractImagesFromProject(raw);
       await setItem('mediaExtracted', true);
-      
-      if (data.worldInfo) {
-           setWorldInfo({
-              ...DEFAULT_WORLD,
-              ...data.worldInfo,
-              description: data.worldInfo.description || '',
-              factions: data.worldInfo.factions || [],
-              loreLocations: data.worldInfo.loreLocations || [],
-              diceConfig: data.worldInfo.diceConfig || { skins: {} },
-              systemInstruction: data.worldInfo.systemInstruction || '',
-              llmProvider: data.worldInfo.llmProvider || 'gemini',
-              llmModel: data.worldInfo.llmModel || 'gemini-3.5-flash',
-              ollamaUrl: data.worldInfo.ollamaUrl || 'http://localhost:11434',
-              ollamaNumCtx: data.worldInfo.ollamaNumCtx ?? 8192,
-              ollamaTemperature: data.worldInfo.ollamaTemperature ?? 0.8,
-              ollamaRepeatPenalty: data.worldInfo.ollamaRepeatPenalty ?? 1.1,
-              openaiApiKey: data.worldInfo.openaiApiKey ?? '',
-              openaiBaseUrl: data.worldInfo.openaiBaseUrl ?? 'https://openrouter.ai/api/v1',
-              openaiModel: data.worldInfo.openaiModel ?? '',
-              comfyUrl: data.worldInfo.comfyUrl || 'http://127.0.0.1:8188',
-              comfyEnabled: !!data.worldInfo.comfyEnabled,
-              comfyWorkflow: data.worldInfo.comfyWorkflow || ''
-           });
-      }
-      
-      // Handle Chapters import with fallback
-      let importedChapters = data.chapters;
-      if (!importedChapters || importedChapters.length === 0) {
-          importedChapters = DEFAULT_CHAPTERS;
-      }
-      setChapters(importedChapters);
+      const norm = normalizeData(raw);
+      const fileTitle = file.name.replace(/\.(zip|json)$/i, '');
 
-      if (data.characters) setCharacters(data.characters);
-      if (data.scenes) {
-          // Migration for import
-          const migratedScenes = data.scenes.map((s: any) => ({
-              ...s,
-              chapterId: s.chapterId || importedChapters[0].id,
-              effects: s.effects || s.unlocks || [],
-              isRepeatable: s.isRepeatable || false,
-              locationName: s.locationName || s.name || 'Unknown Location',
-              aiInstructions: s.aiInstructions || '',
-              sensoryDetails: s.sensoryDetails || '',
-              environmentDetails: s.environmentDetails || '',
-              relevantFactionIds: s.relevantFactionIds ?? undefined,
-              relevantLocationIds: s.relevantLocationIds ?? undefined,
-          }));
-          setScenes(migratedScenes);
-          data.scenes = migratedScenes;
-      }
-      
-      if (data.battles) {
-           const migratedBattles = data.battles.map((b: any) => ({
-               ...b,
-               chapterId: b.chapterId || importedChapters[0].id
-           }));
-           setBattles(migratedBattles);
-           data.battles = migratedBattles;
+      if (mode === 'replace') {
+        const id = activeIdRef.current;
+        const known = new Set(await listImageIds());
+        const oldRefs = collectMediaRefs(stateRef.current, known);
+        // A file without project details keeps the details of the open project
+        if (!norm.worldInfo.projectMeta) norm.worldInfo.projectMeta = stateRef.current.worldInfo.projectMeta;
+        await saveProjectFields(id, norm);
+        applyData(norm, null);
+        const meta = norm.worldInfo.projectMeta;
+        await updateRegistry(reg => ({
+          ...reg,
+          projects: reg.projects.map(p => p.id === id ? { ...p, title: meta?.title ?? '', coverImageId: meta?.coverImageId ?? null, updatedAt: Date.now() } : p),
+        }));
+        await pruneUnusedMedia(oldRefs);
       } else {
-          setBattles([]);
-          data.battles = [];
+        const id = crypto.randomUUID();
+        const meta = norm.worldInfo.projectMeta ?? { title: '' };
+        if (!meta.title?.trim()) meta.title = fileTitle;
+        norm.worldInfo.projectMeta = meta;
+        await saveProjectFields(id, norm);
+        const entry = { ...createEntry(id, meta.title), coverImageId: meta.coverImageId ?? null };
+        await updateRegistry(reg => ({ activeId: id, projects: [...reg.projects, entry] }));
+        activeIdRef.current = id;
+        setActiveProjectId(id);
+        applyData(norm, null);
+        setHasSaveGame(false);
+        setEditorInitialTab('home');
       }
-
-      if (data.maps) setMaps(data.maps);
-      else if (data.mapConfig) setMaps([{ ...data.mapConfig, id: 'map1', name: 'Default Map' }]);
-      
-      if (data.assets) setAssets(data.assets);
-      else setAssets([]);
-
-      if (data.dungeonProjects) setDungeonProjects(data.dungeonProjects);
-      else setDungeonProjects([]);
-
-      await setProjectItem('worldInfo', data.worldInfo);
-      await setProjectItem('chapters', data.chapters);
-      await setProjectItem('characters', data.characters);
-      await setProjectItem('scenes', data.scenes);
-      await setProjectItem('battles', data.battles);
-      await setProjectItem('maps', data.maps);
-      await setProjectItem('dungeons', data.dungeonProjects || []);
-      await setProjectItem('assets', data.assets || []);
-      
-      if (opts?.silent) console.log('Default project imported successfully');
-      else alert("Project loaded successfully!");
+      alert(translate('project.import.done'));
     } catch (error) {
       console.error("Import failed", error);
-      alert("Failed to load project file.");
+      alert(translate('project.import.failed'));
     } finally {
+      readyRef.current = true;
       setIsProcessing(false);
     }
   };
+
+  // Import always asks first: overwrite the open project or create a new one
+  const handleImportProject = (file: File) => setImportFile(file);
 
   const handleStartNewGame = () => {
     // Reset Relationship Values to startValue and reset keyMoments for a new game
@@ -678,7 +803,7 @@ const App: React.FC = () => {
   };
 
   const handleContinueGame = async () => {
-    let savedGame = await getItem<GameSaveData>(GAME_SAVE_KEY);
+    let savedGame = await getItem<GameSaveData>(saveGameKey(activeIdRef.current));
     if (savedGame) {
       try {
         const safeMapId = maps.find(m => m.id === savedGame!.rpgState.currentMapId) ? savedGame!.rpgState.currentMapId : maps[0].id;
@@ -732,7 +857,7 @@ const App: React.FC = () => {
         characterState: charStateMap,
         timestamp: Date.now()
       };
-      await setItem(GAME_SAVE_KEY, saveData);
+      await setItem(saveGameKey(activeIdRef.current), saveData);
       setHasSaveGame(true);
       return true;
   };
@@ -1027,24 +1152,15 @@ const App: React.FC = () => {
               battles={battles}
               assets={assets}
               storyLog={rpgState.storyLog} // PASS STORY LOG TO EDITOR
-              onUpdateWorldInfo={(updatedWorld) => {
-                setWorldInfo(updatedWorld);
-                setProjectItem('worldInfo', updatedWorld).catch(console.error);
-              }}
+              onUpdateWorldInfo={setWorldInfo}
               onUpdateChapters={setChapters}
               onUpdateCharacters={setCharacters}
               onUpdateScenes={setScenes}
               onUpdateMaps={setMaps}
               onUpdateBattles={setBattles}
               dungeonProjects={dungeonProjects}
-              onUpdateDungeonProjects={(next) => {
-                setDungeonProjects(next);
-                setProjectItem('dungeons', next).catch(console.error);
-              }}
-              onUpdateAssets={(updatedAssets) => {
-                setAssets(updatedAssets);
-                setProjectItem('assets', updatedAssets).catch(console.error);
-              }}
+              onUpdateDungeonProjects={setDungeonProjects}
+              onUpdateAssets={setAssets}
               onPlay={handleStartNewGame}
               onQuickSave={handleQuickSave}
               onExportProject={handleExportProject}
@@ -1055,6 +1171,12 @@ const App: React.FC = () => {
               onContinueGame={handleContinueGame}
               onBuildDungeon={(id) => { setActiveDungeonBuildId(id); setEditorInitialTab('dungeons'); setMode('dungeon_test'); }}
               initialTab={editorInitialTab}
+              projects={(registry?.projects ?? []).map(p => ({ id: p.id, title: p.title, coverImageId: p.coverImageId }))}
+              activeProjectId={activeProjectId}
+              lastEdited={registry?.projects.find(p => p.id === activeProjectId)?.updatedAt}
+              onSelectProject={handleSelectProject}
+              onCreateProject={handleCreateProject}
+              onDeleteProject={() => setShowDeleteDialog(true)}
             />
           </motion.div>
         )}
@@ -1135,18 +1257,10 @@ const App: React.FC = () => {
                  return true;
               }}
               onCharacterUpdate={(updatedChar) => {
-                  setCharacters(prev => {
-                      const newList = prev.map(c => c.id === updatedChar.id ? updatedChar : c);
-                      setProjectItem('characters', newList).catch(console.error);
-                      return newList;
-                  });
+                  setCharacters(prev => prev.map(c => c.id === updatedChar.id ? updatedChar : c));
               }}
               onSceneUpdate={(updatedScene) => {
-                  setScenes(prev => {
-                      const newList = prev.map(s => s.id === updatedScene.id ? updatedScene : s);
-                      setProjectItem('scenes', newList).catch(console.error);
-                      return newList;
-                  });
+                  setScenes(prev => prev.map(s => s.id === updatedScene.id ? updatedScene : s));
               }}
             />
           </motion.div>
@@ -1168,11 +1282,7 @@ const App: React.FC = () => {
                 scenes={scenes}
                 dungeonProject={dungeonProjects.find(d => d.id === activeDungeonBuildId) || undefined}
                 onSaveProject={(patch) => {
-                  setDungeonProjects(prev => {
-                    const next = prev.map(d => d.id === activeDungeonBuildId ? { ...d, ...patch } : d);
-                    setProjectItem('dungeons', next).catch(console.error);
-                    return next;
-                  });
+                  setDungeonProjects(prev => prev.map(d => d.id === activeDungeonBuildId ? { ...d, ...patch } : d));
                 }}
               />
             </ErrorBoundary>
@@ -1204,6 +1314,33 @@ const App: React.FC = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {importFile && (
+        <Dialog
+          title={t('project.import.title')}
+          onClose={() => setImportFile(null)}
+          actions={[
+            { label: t('common.cancel'), onClick: () => setImportFile(null) },
+            { label: t('project.import.replace'), onClick: () => { const f = importFile; setImportFile(null); runImport(f, 'replace'); } },
+            { label: t('project.import.new'), primary: true, onClick: () => { const f = importFile; setImportFile(null); runImport(f, 'new'); } },
+          ]}
+        >
+          {t('project.import.text').replace('{name}', worldInfo.projectMeta?.title?.trim() || t('home.untitled'))}
+        </Dialog>
+      )}
+
+      {showDeleteDialog && (
+        <Dialog
+          title={t('project.delete.title')}
+          onClose={() => setShowDeleteDialog(false)}
+          actions={[
+            { label: t('common.cancel'), onClick: () => setShowDeleteDialog(false) },
+            { label: t('project.delete.confirm'), primary: true, onClick: handleDeleteProject },
+          ]}
+        >
+          {t('project.delete.text').replace('{name}', worldInfo.projectMeta?.title?.trim() || t('home.untitled'))}
+        </Dialog>
+      )}
     </div>
   );
 };
