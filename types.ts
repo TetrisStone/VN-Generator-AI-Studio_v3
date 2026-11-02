@@ -223,7 +223,22 @@ export interface WorldLocation {
     teaser?: string;
 }
 
+/** Descriptive project data shown on the Home screen. No technical effect on the game. */
+export interface ProjectMeta {
+  title: string;
+  tagline?: string;
+  genre?: string;
+  tone?: string;
+  targetLength?: string;
+  /** Image id (images store) used for hero background, card and emblem */
+  coverImageId?: string | null;
+  lastEdited?: number;
+}
+
+export type EditorTab = 'home' | 'settings' | 'world' | 'chapters' | 'chars' | 'scenes' | 'maps' | 'dungeons' | 'battles' | 'assets';
+
 export interface WorldInfo {
+  projectMeta?: ProjectMeta;
   description: string;
   factions: Faction[];
   loreLocations: WorldLocation[];

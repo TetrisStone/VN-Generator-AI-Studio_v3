@@ -5,7 +5,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>VN Creator AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <script>
+      // Gray + emerald are driven by CSS variables (see theme.css). Defaults equal the
+      // stock Tailwind palette (player / RPG / battle look unchanged); the editor shell
+      // (.vn-theme) swaps them for the navy + gold palette.
+      const scale = (name) => Object.fromEntries(
+        [50,100,200,300,400,500,600,700,800,900,950].map(k => [k, `rgb(var(--${name}-${k}) / <alpha-value>)`])
+      );
+      tailwind.config = {
+        theme: { extend: {
+          colors: { gray: scale('gray'), emerald: scale('emerald') },
+          fontFamily: {
+            display: ['Cinzel', 'serif'],
+            serif: ['"Cormorant Garamond"', 'Georgia', 'serif']
+          }
+        } }
+      };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Cinzel:wght@400;500;600;700&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
     <style>
       body { font-family: 'Inter', sans-serif; }
       /* Custom Scrollbar */

@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Character, CharacterImportance, CharacterAlignment, Scene, WorldMap, Battle, WorldInfo, Chapter, SceneEffect, MapSpot, WorldLocation, Faction, RelationshipTrigger, RelationshipThreshold, StoryLogEntry, AssetItem, DungeonProject, DungeonSection, DungeonBaseGLB, DungeonChunkLibraryEntry, DungeonChunkPlacement, DungeonNpcLibraryEntry, DungeonNpcPlacement, DungeonChunkType, DungeonNpcKind } from '../types';
+import { EditorTab, ProjectMeta, Character, CharacterImportance, CharacterAlignment, Scene, WorldMap, Battle, WorldInfo, Chapter, SceneEffect, MapSpot, WorldLocation, Faction, RelationshipTrigger, RelationshipThreshold, StoryLogEntry, AssetItem, DungeonProject, DungeonSection, DungeonBaseGLB, DungeonChunkLibraryEntry, DungeonChunkPlacement, DungeonNpcLibraryEntry, DungeonNpcPlacement, DungeonChunkType, DungeonNpcKind } from '../types';
 import { Button } from './ui/Button';
+import { Sidebar } from './layout/Sidebar';
+import { HomeView } from './HomeView';
+import { SettingsView } from './SettingsView';
 import { Trash, Sword, Scaling, Plus, Save, Play, Download, Upload, Monitor, Map as MapIcon, Users, Target, Book, Layout, MessageSquare, Unlock, Lock, Waypoints, Image as ImageIcon, XCircle, Terminal, MapPin, Heart, EyeOff, Video, Music, Sparkles, Loader2, ArrowLeft, Cpu, Check, FolderOpen, ChevronUp, ChevronDown, ExternalLink, X, Move, ChevronLeft, ChevronRight, Search, Compass, Boxes } from 'lucide-react';
 import { CHARACTER_GROUPS, getCharacterGroupKey, getCharacterGroup, CharacterGroupKey } from '../utils/characterUtils';
 import { generateAutoScene, generateLoreTeaser } from '../services/geminiService';
@@ -2447,7 +2450,7 @@ interface EditorProps {
   initialTab?: EditorTab;
 }
 
-export type EditorTab = 'home' | 'world' | 'chapters' | 'chars' | 'scenes' | 'maps' | 'dungeons' | 'battles' | 'assets';
+export type { EditorTab };
 
 export const Editor: React.FC<EditorProps> = (props) => {
     const [tab, setTab] = useState<EditorTab>(props.initialTab ?? 'home');
@@ -2456,7 +2459,6 @@ export const Editor: React.FC<EditorProps> = (props) => {
     const [scenePrompt, setScenePrompt] = useState("");
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isSubSidebarOpen, setIsSubSidebarOpen] = useState(true);
-    const [quickSaveSuccess, setQuickSaveSuccess] = useState(false);
 
     // Dungeons tab state
     const [renamingDungeonId, setRenamingDungeonId] = useState<string | null>(null);
@@ -2489,33 +2491,8 @@ export const Editor: React.FC<EditorProps> = (props) => {
         }
     };
 
-    const navItems: { id: typeof tab; label: string; icon: React.ReactNode }[] = [
-        { id: 'home', label: 'Home Settings', icon: <Play size={16}/> },
-        { id: 'world', label: 'World & Lore', icon: <Book size={16}/> },
-        { id: 'chapters', label: 'Chapters', icon: <Book size={16}/> },
-        { id: 'chars', label: 'Characters', icon: <Users size={16}/> },
-        { id: 'scenes', label: 'Scenes', icon: <Monitor size={16}/> },
-        { id: 'maps', label: 'Maps', icon: <MapIcon size={16}/> },
-        { id: 'dungeons', label: 'Dungeons', icon: <Boxes size={16}/> },
-        { id: 'battles', label: 'Battles', icon: <Target size={16}/> },
-        { id: 'assets', label: 'Assets', icon: <FolderOpen size={16}/> },
-    ];
-
-    const handleQuickSaveClick = async () => {
-        if (props.onQuickSave) {
-            await props.onQuickSave();
-            setQuickSaveSuccess(true);
-            setTimeout(() => setQuickSaveSuccess(false), 2500);
-        }
-    };
-
-    const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files?.[0]) props.onImportProject(e.target.files[0]);
-    };
-
-    const handleImportSave = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files?.[0] && props.onImportSave) props.onImportSave(e.target.files[0]);
-    };
+    const projectMeta: ProjectMeta = props.worldInfo.projectMeta ?? { title: '' };
+    const updateProjectMeta = (meta: ProjectMeta) => props.onUpdateWorldInfo({ ...props.worldInfo, projectMeta: meta });
 
     // -------------------------------------------------------------------
     // Dungeons tab: catalog of 3D dungeon projects
@@ -2554,7 +2531,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
             const emptySandbox = !chunkLibrary?.length && !placedChunks?.length && !npcLibrary?.length &&
                 !baseFloor && !baseWall && !baseDoor && !baseCharacter;
             if (emptySandbox) {
-                alert('Die Sandbox ist leer. Baue zuerst im "Dungeon Test" etwas — oder lege einen neuen Dungeon an.');
+                alert('Die Sandbox ist leer. Lege stattdessen einen neuen Dungeon an.');
                 return;
             }
 
@@ -2621,7 +2598,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
 
     return (
         <WorldInfoContext.Provider value={props.worldInfo}>
-            <div className="flex h-screen overflow-hidden text-sm">
+            <div className="vn-theme flex h-screen overflow-hidden text-sm">
             {/* Mobile Sidebar Toggle Button */}
             <button
                 className="md:hidden absolute top-4 right-4 z-50 p-2 bg-gray-800 rounded-md text-white border border-gray-700"
@@ -2631,427 +2608,41 @@ export const Editor: React.FC<EditorProps> = (props) => {
             </button>
 
             {/* Sidebar */}
-            <div className={`${isSidebarOpen ? 'w-64 md:w-64' : 'w-0 md:w-16'} transition-all duration-300 ease-in-out bg-gray-900 border-r border-gray-800 flex flex-col flex-shrink-0 z-40 relative md:static absolute inset-y-0 left-0 overflow-hidden`}>
-                <div className={`p-3 md:p-4 border-b border-gray-800 flex items-center whitespace-nowrap ${isSidebarOpen ? 'justify-between min-w-[16rem]' : 'justify-center min-w-0'}`}>
-                    {isSidebarOpen ? (
-                        <>
-                            <h1 className="text-lg md:text-xl font-bold text-emerald-500 flex items-center gap-2"><Layout size={18}/> VN Creator</h1>
-                            <div className="flex items-center gap-1">
-                                <button className="hidden md:flex text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition-colors" onClick={() => setIsSidebarOpen(false)} title="Menü einklappen">
-                                    <ChevronLeft size={18}/>
-                                </button>
-                                <button className="md:hidden text-gray-500" onClick={() => setIsSidebarOpen(false)}><XCircle size={20}/></button>
-                            </div>
-                        </>
-                    ) : (
-                        <button className="hidden md:flex text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition-colors" onClick={() => setIsSidebarOpen(true)} title="Menü ausklappen">
-                            <ChevronRight size={18}/>
-                        </button>
-                    )}
-                </div>
-                <div className={`flex-1 overflow-y-auto py-2 md:py-4 space-y-1 ${isSidebarOpen ? 'min-w-[16rem]' : 'min-w-0'}`}>
-                    {navItems.map(item => (
-                        <button 
-                            key={item.id} 
-                            onClick={() => { setTab(item.id); setSelectedId(null); if (window.innerWidth < 768) setIsSidebarOpen(false); }} 
-                            title={item.label}
-                            className={`w-full text-left py-2.5 md:py-3 flex items-center gap-3 transition-colors ${
-                                isSidebarOpen ? 'px-4 md:px-6' : 'px-0 justify-center'
-                            } ${
-                                tab === item.id 
-                                    ? 'bg-emerald-900/30 text-emerald-400 border-r-2 border-emerald-500 font-semibold' 
-                                    : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-                            }`}
-                        >
-                            <span className="flex-shrink-0">{item.icon}</span>
-                            {isSidebarOpen && <span className="truncate">{item.label}</span>}
-                        </button>
-                    ))}
-                    {props.onDungeonTest && (
-                        <div className="pt-3 px-2 border-t border-gray-800/80">
-                            <button
-                                onClick={props.onDungeonTest}
-                                title="3D Dungeon Testbühne betreten"
-                                className={`w-full py-2.5 flex items-center gap-2.5 rounded-xl bg-purple-900/30 hover:bg-purple-900/50 text-purple-300 hover:text-white border border-purple-700/50 transition-all font-semibold text-xs shadow-md ${
-                                    isSidebarOpen ? 'px-3' : 'px-0 justify-center'
-                                }`}
-                            >
-                                <Compass size={17} className="text-purple-400 flex-shrink-0" />
-                                {isSidebarOpen && <span className="truncate">Dungeon Test</span>}
-                            </button>
-                        </div>
-                    )}
-                </div>
-            </div>
-            
+            <Sidebar
+                tab={tab}
+                isOpen={isSidebarOpen}
+                onSelect={(id) => { setTab(id); setSelectedId(null); if (window.innerWidth < 768) setIsSidebarOpen(false); }}
+                onToggle={setIsSidebarOpen}
+            />
+
             {/* Backdrop for mobile sidebar */}
             {isSidebarOpen && <div className="md:hidden fixed inset-0 bg-black/60 z-30" onClick={() => setIsSidebarOpen(false)} />}
 
             {/* Main Content */}
             <div className="flex-1 bg-gray-950 flex flex-col w-full min-w-0 h-full">
-                <div className="flex-1 p-4 md:p-8 overflow-hidden flex flex-col">
+                <div className={`flex-1 overflow-hidden flex flex-col ${tab === 'home' ? 'p-0' : 'p-4 md:p-8'}`}>
                 {/* ... (Existing World and Chars Tabs) ... */}
                 {tab === 'home' && (
-                    <div className="max-w-3xl mx-auto w-full space-y-8 overflow-y-auto h-full pb-12 pt-4">
-                        <div className="text-center mb-8">
-                            <h2 className="text-3xl font-bold text-white mb-2 flex items-center justify-center gap-3">
-                                <Layout size={32} className="text-emerald-500" /> VN Creator UI
-                            </h2>
-                            <p className="text-gray-400">Manage your project and launch the game.</p>
-                        </div>
-                        
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                            <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 space-y-4">
-                                <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Play className="text-green-500" size={20}/> Play Game</h3>
-                                <Button onClick={props.onPlay} className="w-full justify-center bg-green-600 hover:bg-green-500 py-3 text-base font-semibold"><Play size={18} className="mr-2"/> Start New Game</Button>
-                                {props.hasSaveGame && <Button onClick={props.onContinueGame} variant="secondary" className="w-full justify-center py-3 text-base font-semibold"><Play size={18} className="mr-2"/> Continue Save Game</Button>}
-                                {props.onDungeonTest && (
-                                    <Button onClick={props.onDungeonTest} className="w-full justify-center bg-purple-600 hover:bg-purple-500 text-white py-3 text-base font-semibold shadow-lg shadow-purple-950/40 border border-purple-400/30">
-                                        <Compass size={18} className="mr-2 text-purple-200"/> Dungeon Test
-                                    </Button>
-                                )}
-                            </div>
-
-                            <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 space-y-4">
-                                <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Save className="text-blue-500" size={20}/> Save Data Management</h3>
-                                <p className="text-xs text-gray-400 mb-2">Save progress locally or export/import save files.</p>
-                                <div className="grid grid-cols-1 gap-3">
-                                    <Button 
-                                        variant="secondary" 
-                                        onClick={handleQuickSaveClick} 
-                                        title="Quick Save Project to Local Browser Storage" 
-                                        className={`py-2 justify-center transition-colors ${quickSaveSuccess ? 'border-emerald-500 text-emerald-400 bg-emerald-950/40' : ''}`}
-                                    >
-                                        {quickSaveSuccess ? (
-                                            <>
-                                                <Check size={16} className="mr-2 text-emerald-400"/>
-                                                Projekt lokal gespeichert!
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Save size={16} className="mr-2"/>
-                                                Quick Save locally
-                                            </>
-                                        )}
-                                    </Button>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <Button variant="secondary" onClick={props.onExportSave} title="Export Save Game to File" className="py-2 justify-center"><Download size={16} className="mr-2"/> Export Save</Button>
-                                        <div className="relative">
-                                            <Button variant="secondary" className="w-full py-2 justify-center" title="Import Save Game from File"><Upload size={16} className="mr-2"/> Import Save</Button>
-                                            <input type="file" onChange={handleImportSave} className="absolute inset-0 opacity-0 cursor-pointer" accept=".json"/>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 space-y-4 md:col-span-2">
-                                <h3 className="text-lg font-bold text-white mb-2 flex items-center gap-2"><Download className="text-emerald-500" size={20}/> Project Data (Editor)</h3>
-                                <p className="text-xs text-gray-400 mb-4">Exportieren oder Importieren des VN Creator Projekts. Bei "Full Project" werden alle generierten KI-Bilder, Sprach- und BGM-Dateien mit in die ZIP gepackt.</p>
-                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                                    <Button variant="secondary" onClick={() => props.onExportProject(true)} title="Export Full Project with all Media" className="py-3 justify-center font-semibold text-emerald-400 border-emerald-500/30 hover:bg-emerald-900/20"><Download size={18} className="mr-2"/> Export Full (inkl. Medien)</Button>
-                                    <Button variant="secondary" onClick={() => props.onExportProject(false)} title="Export Light Project (Data only)" className="py-3 justify-center font-semibold text-cyan-400 border-cyan-500/30 hover:bg-cyan-900/20"><Download size={18} className="mr-2"/> Export Light (nur Daten)</Button>
-                                    <div className="relative">
-                                        <Button variant="secondary" className="w-full py-3 justify-center font-semibold text-emerald-400 border-emerald-500/30 hover:bg-emerald-900/20" title="Import Editor Project"><Upload size={18} className="mr-2"/> Import Project (ZIP/JSON)</Button>
-                                        <input type="file" onChange={handleImport} className="absolute inset-0 opacity-0 cursor-pointer" accept=".json,.zip"/>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* LLM Settings */}
-                            <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 space-y-4 md:col-span-2">
-                                <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Cpu className="text-orange-500" size={20}/> Model Settings</h3>
-                                <p className="text-xs text-gray-400 mb-4">Select the AI Model used for generation.</p>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="text-xs font-bold text-gray-500 uppercase">Provider</label>
-                                        <select 
-                                            className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none"
-                                            value={props.worldInfo.llmProvider || 'gemini'}
-                                            onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, llmProvider: e.target.value as 'gemini' | 'ollama' | 'openai' })}
-                                        >
-                                            <option value="gemini">Gemini</option>
-                                            <option value="ollama">Local (Ollama)</option>
-                                            <option value="openai">OpenAI Compatible (Router)</option>
-                                        </select>
-                                    </div>
-                                    {(!props.worldInfo.llmProvider || props.worldInfo.llmProvider === 'gemini') && (
-                                        <div>
-                                            <label className="text-xs font-bold text-gray-500 uppercase">Model</label>
-                                            <select 
-                                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none"
-                                                value={props.worldInfo.llmModel || 'gemini-3.5-flash'}
-                                                onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, llmModel: e.target.value })}
-                                            >
-                                                <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-                                                <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Preview)</option>
-                                            </select>
-                                        </div>
-                                    )}
-                                    {props.worldInfo.llmProvider === 'openai' && (
-                                        <div>
-                                            <label className="text-xs font-bold text-gray-500 uppercase">Model Name</label>
-                                            <input 
-                                                type="text"
-                                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none placeholder:text-gray-600 font-mono text-xs"
-                                                value={props.worldInfo.openaiModel || ''}
-                                                placeholder="e.g. nous-hermes/llama-3.1-70b"
-                                                onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, openaiModel: e.target.value })}
-                                            />
-                                        </div>
-                                    )}
-                                    {props.worldInfo.llmProvider === 'openai' && (
-                                        <>
-                                            <div>
-                                                <label className="text-xs font-bold text-gray-500 uppercase">API Key</label>
-                                                <input 
-                                                    type="password"
-                                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none placeholder:text-gray-600 font-mono text-xs"
-                                                    value={props.worldInfo.openaiApiKey || ''}
-                                                    placeholder="sk-or-v1-..."
-                                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, openaiApiKey: e.target.value })}
-                                                />
-                                            </div>
-                                            <div>
-                                                <label className="text-xs font-bold text-gray-500 uppercase">Base URL</label>
-                                                <input 
-                                                    type="text"
-                                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none placeholder:text-gray-600 font-mono text-xs"
-                                                    value={props.worldInfo.openaiBaseUrl !== undefined ? props.worldInfo.openaiBaseUrl : 'https://openrouter.ai/api/v1'}
-                                                    placeholder="https://openrouter.ai/api/v1"
-                                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, openaiBaseUrl: e.target.value })}
-                                                />
-                                            </div>
-                                            <div className="sm:col-span-2 space-y-2">
-                                                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-gray-400">
-                                                    <span>Schnellwahl Base URL:</span>
-                                                    {[
-                                                        { name: 'OpenRouter', url: 'https://openrouter.ai/api/v1', defaultModel: 'nous-hermes/llama-3.1-70b' },
-                                                        { name: 'Requesty', url: 'https://router.requesty.ai/v1', defaultModel: '' },
-                                                        { name: 'Groq', url: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile' },
-                                                        { name: 'Local (LM Studio / Ollama)', url: 'http://localhost:1234/v1', defaultModel: '' }
-                                                    ].map(p => (
-                                                        <button
-                                                            key={p.name}
-                                                            type="button"
-                                                            onClick={() => {
-                                                                props.onUpdateWorldInfo({
-                                                                    ...props.worldInfo,
-                                                                    openaiBaseUrl: p.url,
-                                                                    openaiModel: props.worldInfo.openaiModel || p.defaultModel
-                                                                });
-                                                            }}
-                                                            className={`px-2 py-0.5 rounded border transition-colors ${
-                                                                (props.worldInfo.openaiBaseUrl || 'https://openrouter.ai/api/v1') === p.url
-                                                                    ? 'bg-emerald-600 text-white border-emerald-500 font-medium'
-                                                                    : 'bg-gray-800/90 hover:bg-gray-700 text-gray-300 border-gray-700'
-                                                            }`}
-                                                        >
-                                                            {p.name}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                                <p className="text-[11px] text-gray-400 bg-gray-950 p-2.5 rounded border border-gray-800">
-                                                    Kompatibel mit OpenRouter, Requesty, NVIDIA NIM, Groq, LM Studio oder jedem OpenAI-kompatiblen API-Endpunkt.
-                                                </p>
-                                            </div>
-                                            {!props.worldInfo.openaiApiKey?.trim() && (
-                                                <div className="sm:col-span-2 text-[11px] text-amber-400 bg-amber-950/40 border border-amber-800/50 p-2.5 rounded flex items-center gap-2">
-                                                    <span>⚠️</span>
-                                                    <span>Hinweis: Bitte trage einen gültigen API-Key ein, um diesen Provider für LLM-Aufrufe zu nutzen.</span>
-                                                </div>
-                                            )}
-                                        </>
-                                    )}
-                                    {props.worldInfo.llmProvider === 'ollama' && (
-                                        <div className="sm:col-span-2">
-                                            <label className="text-xs font-bold text-gray-500 uppercase">Model</label>
-                                            <input
-                                                type="text"
-                                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none placeholder:text-gray-600"
-                                                value={props.worldInfo.llmModel || 'llama3'}
-                                                placeholder="e.g. llama3, mistral, qwen2.5:14b"
-                                                onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, llmModel: e.target.value })}
-                                            />
-                                        </div>
-                                    )}
-                                    {props.worldInfo.llmProvider === 'ollama' && (
-                                        <>
-                                            <div className="sm:col-span-2 bg-gray-950/60 p-4 rounded-lg border border-gray-800 space-y-3">
-                                                <div className="flex justify-between items-center">
-                                                    <label className="text-xs font-bold text-gray-400 uppercase flex items-center gap-1.5">
-                                                        Context Size (num_ctx)
-                                                    </label>
-                                                    <span className="text-xs font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-800/50 font-semibold">
-                                                        {props.worldInfo.ollamaNumCtx 
-                                                            ? `${props.worldInfo.ollamaNumCtx >= 1024 ? `${(props.worldInfo.ollamaNumCtx / 1024).toFixed(props.worldInfo.ollamaNumCtx % 1024 === 0 ? 0 : 1)}K` : props.worldInfo.ollamaNumCtx} Tokens (${props.worldInfo.ollamaNumCtx})` 
-                                                            : '8K Tokens (8192)'}
-                                                    </span>
-                                                </div>
-                                                <input 
-                                                    type="number"
-                                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none font-mono text-sm"
-                                                    value={props.worldInfo.ollamaNumCtx ?? 8192}
-                                                    placeholder="8192"
-                                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaNumCtx: parseInt(e.target.value, 10) || 8192 })}
-                                                />
-                                                <div>
-                                                    <div className="text-[11px] text-gray-400 mb-1.5 font-medium">Standardgrößen (Schnellwahl per Klick):</div>
-                                                    <div className="flex flex-wrap gap-1.5">
-                                                        {[
-                                                            { label: '2K (2048)', val: 2048 },
-                                                            { label: '4K (4096)', val: 4096 },
-                                                            { label: '8K (8192)', val: 8192, badge: 'Standard' },
-                                                            { label: '16K (16384)', val: 16384 },
-                                                            { label: '32K (32768)', val: 32768 },
-                                                            { label: '64K (65536)', val: 65536, badge: 'Groß' },
-                                                            { label: '128K (131072)', val: 131072 }
-                                                        ].map(preset => {
-                                                            const isSelected = (props.worldInfo.ollamaNumCtx ?? 8192) === preset.val;
-                                                            return (
-                                                                <button
-                                                                    key={preset.val}
-                                                                    type="button"
-                                                                    onClick={() => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaNumCtx: preset.val })}
-                                                                    className={`text-xs px-2.5 py-1 rounded border transition-all flex items-center gap-1 cursor-pointer ${
-                                                                        isSelected
-                                                                            ? 'bg-emerald-600 text-white border-emerald-400 font-semibold shadow-sm'
-                                                                            : 'bg-gray-800/90 hover:bg-gray-700 text-gray-300 border-gray-700 hover:border-gray-600'
-                                                                    }`}
-                                                                >
-                                                                    <span>{preset.label}</span>
-                                                                    {preset.badge && (
-                                                                        <span className={`text-[9px] px-1 py-0.2 rounded uppercase font-bold ${
-                                                                            isSelected ? 'bg-emerald-800 text-white' : 'bg-gray-900 text-gray-400'
-                                                                        }`}>
-                                                                            {preset.badge}
-                                                                        </span>
-                                                                    )}
-                                                                </button>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                    <p className="text-[11px] text-gray-400 mt-2 leading-relaxed">
-                                                        Hinweis: Kontextgrößen bei Sprachmodellen sind Potenzen von 2 (z. B. 8192 = 8K, 65536 = 64K). Höhere Werte erlauben längere Dialoge, benötigen aber mehr VRAM.
-                                                    </p>
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <div className="flex justify-between items-center mb-1">
-                                                    <label className="text-xs font-bold text-gray-500 uppercase">Temperature</label>
-                                                    <span className="text-[11px] text-gray-400 font-mono">{props.worldInfo.ollamaTemperature ?? 0.8}</span>
-                                                </div>
-                                                <input 
-                                                    type="number"
-                                                    step="0.05"
-                                                    min="0"
-                                                    max="2"
-                                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none font-mono text-sm"
-                                                    value={props.worldInfo.ollamaTemperature ?? 0.8}
-                                                    placeholder="0.8"
-                                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaTemperature: parseFloat(e.target.value) || 0.8 })}
-                                                />
-                                                <p className="text-[10px] text-gray-500 mt-1">0.7 – 0.8 empfohlen für kreative Antworten.</p>
-                                            </div>
-                                            <div>
-                                                <div className="flex justify-between items-center mb-1">
-                                                    <label className="text-xs font-bold text-gray-500 uppercase">Repeat Penalty</label>
-                                                    <span className="text-[11px] text-gray-400 font-mono">{props.worldInfo.ollamaRepeatPenalty ?? 1.1}</span>
-                                                </div>
-                                                <input 
-                                                    type="number"
-                                                    step="0.05"
-                                                    min="1"
-                                                    max="2"
-                                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none font-mono text-sm"
-                                                    value={props.worldInfo.ollamaRepeatPenalty ?? 1.1}
-                                                    placeholder="1.1"
-                                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaRepeatPenalty: parseFloat(e.target.value) || 1.1 })}
-                                                />
-                                                <p className="text-[10px] text-gray-500 mt-1">1.1 empfohlen zur Vermeidung von Wiederholungen.</p>
-                                            </div>
-                                        </>
-                                    )}
-                                    {props.worldInfo.llmProvider === 'ollama' && (
-                                        <div className="sm:col-span-2">
-                                            <label className="text-xs font-bold text-gray-500 uppercase">Ollama URL</label>
-                                            <input 
-                                                type="text"
-                                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none font-mono text-xs"
-                                                value={props.worldInfo.ollamaUrl || 'http://localhost:11434'}
-                                                placeholder="http://localhost:11434"
-                                                onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaUrl: e.target.value })}
-                                            />
-                                        </div>
-                                    )}
-
-                                    {/* ComfyUI Settings */}
-                                    <div className="sm:col-span-2 border-t border-gray-800 pt-6 mt-4">
-                                        <div className="flex justify-between items-center mb-4">
-                                            <div>
-                                                <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                                                    <Sparkles size={16} className="text-emerald-500" /> Local ComfyUI Image Generation
-                                                </h4>
-                                                <p className="text-[11px] text-gray-500">Enable local AI image generation using a running ComfyUI server.</p>
-                                            </div>
-                                            <label className="flex items-center gap-2 text-xs bg-gray-800 px-3 py-1.5 rounded-lg border border-gray-700 cursor-pointer select-none">
-                                                <input 
-                                                    type="checkbox" 
-                                                    checked={props.worldInfo.comfyEnabled || false} 
-                                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, comfyEnabled: e.target.checked })} 
-                                                    className="rounded text-emerald-600 focus:ring-emerald-500 bg-gray-900 border-gray-700"
-                                                />
-                                                <span className="font-semibold text-gray-300">Aktiviert</span>
-                                            </label>
-                                        </div>
-
-                                        {props.worldInfo.comfyEnabled && (
-                                            <div className="space-y-4 bg-gray-950 p-4 rounded-lg border border-gray-800">
-                                                <div>
-                                                    <label className="text-xs font-bold text-gray-400 uppercase">ComfyUI URL</label>
-                                                    <input 
-                                                        type="text"
-                                                        className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white text-xs mt-1 focus:border-emerald-500 outline-none font-mono"
-                                                        value={props.worldInfo.comfyUrl || 'http://127.0.0.1:8188'}
-                                                        placeholder="e.g. http://127.0.0.1:8188"
-                                                        onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, comfyUrl: e.target.value })}
-                                                    />
-                                                    <p className="text-[10px] text-gray-500 mt-1">
-                                                        Stelle sicher, dass du ComfyUI mit dem Argument <code className="bg-gray-800 px-1 py-0.5 rounded text-gray-300">--enable-cors-header</code> startest, um CORS-Fehler im Browser zu vermeiden.
-                                                    </p>
-                                                </div>
-
-                                                <div>
-                                                    <div className="flex justify-between items-center mb-1">
-                                                        <label className="text-xs font-bold text-gray-400 uppercase">ComfyUI API Workflow (JSON)</label>
-                                                        <button 
-                                                            type="button"
-                                                            onClick={() => {
-                                                                if (window.confirm('Möchtest du das standardmäßige KSampler-Workflow-Template laden?')) {
-                                                                    props.onUpdateWorldInfo({ ...props.worldInfo, comfyWorkflow: getDefaultWorkflow() });
-                                                                }
-                                                            }}
-                                                            className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800 hover:bg-emerald-900 px-2 py-0.5 rounded transition-colors"
-                                                        >
-                                                            Reset auf Standard-Template
-                                                        </button>
-                                                    </div>
-                                                    <textarea 
-                                                        className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white text-[10px] focus:border-emerald-500 outline-none font-mono h-40 custom-scrollbar"
-                                                        value={props.worldInfo.comfyWorkflow || ''}
-                                                        placeholder="Füge hier deinen exportierten ComfyUI API JSON Workflow ein..."
-                                                        onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, comfyWorkflow: e.target.value })}
-                                                    />
-                                                    <p className="text-[10px] text-gray-500 mt-1 leading-relaxed">
-                                                        Füge das im <strong>API-Format</strong> (Export API in ComfyUI aktivieren) gespeicherte JSON ein. Verwende <code className="bg-gray-800 px-1 py-0.5 rounded text-gray-300">PROMPT_PLACEHOLDER</code> im Text-Node sowie <code className="bg-gray-800 px-1 py-0.5 rounded text-gray-300">WIDTH_PLACEHOLDER</code> / <code className="bg-gray-800 px-1 py-0.5 rounded text-gray-300">HEIGHT_PLACEHOLDER</code> in den EmptyLatentImage-Dimensionen.
-                                                    </p>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                    <HomeView
+                        meta={projectMeta}
+                        onUpdateMeta={updateProjectMeta}
+                        hasSaveGame={props.hasSaveGame}
+                        onPlay={props.onPlay}
+                        onContinue={props.onContinueGame}
+                        onOpenSettings={() => { setTab('settings'); setSelectedId(null); }}
+                    />
+                )}
+                {tab === 'settings' && (
+                    <SettingsView
+                        worldInfo={props.worldInfo}
+                        onUpdateWorldInfo={props.onUpdateWorldInfo}
+                        onQuickSave={props.onQuickSave}
+                        onExportProject={props.onExportProject}
+                        onImportProject={props.onImportProject}
+                        onExportSave={props.onExportSave}
+                        onImportSave={props.onImportSave}
+                        onBack={() => { setTab('home'); setSelectedId(null); }}
+                    />
                 )}
                 {tab === 'world' && (
                     <div className="max-w-4xl space-y-8 overflow-y-auto h-full pr-4 pb-12">
@@ -3688,7 +3279,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                 className="py-1.5 text-sm"
                                 onClick={importSandboxToDungeon}
                                 disabled={isImportingSandbox}
-                                title="Kopiert den aktuellen Stand der 'Dungeon Test'-Sandbox als eigenständiges Dungeon-Projekt"
+                                title="Kopiert den Stand der alten 3D-Sandbox als eigenständiges Dungeon-Projekt"
                             >
                                 <Upload size={14}/> {isImportingSandbox ? 'Importiere…' : 'Sandbox importieren'}
                             </Button>
@@ -3697,8 +3288,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                         <div className="mb-5 p-3 bg-sky-950/40 border border-sky-800/60 rounded-xl text-xs text-sky-200 leading-relaxed">
                             <strong className="font-bold">Hinweis:</strong> „Bauen" öffnet die 3D-Bühne direkt mit diesem
                             Dungeon-Projekt geladen — Chunks/Figuren hochladen &amp; platzieren, Änderungen werden automatisch
-                            zurück ins Projekt gespeichert. Der „Dungeon Test"-Button in Home/Seitenleiste öffnet weiterhin
-            die separate Sandbox. „Spielen" folgt in Phase 3 (Einstieg über Karten-Spots).
+                            zurück ins Projekt gespeichert. „Spielen" folgt in Phase 3 (Einstieg über Karten-Spots).
                         </div>
 
                         {(props.dungeonProjects || []).length === 0 && (
