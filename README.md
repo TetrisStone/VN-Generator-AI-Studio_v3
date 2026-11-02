@@ -19,6 +19,17 @@ Instead of keeping everything in memory and dropping it into localStorage, the a
 
 Upon loading the app for the first time, legacy `localStorage`-based saves are automatically converted to IndexedDB architecture via a built-in migration subroutine on application start. Old values are ported properly and existing game states are maintained to prevent progress loss.
 
+### Multiple Projects
+
+The editor can hold several projects side by side (Home → Project Emblem: arrows / dots to switch, **New Project**, **Delete Project**).
+
+- A registry (`vn_projects_registry` in the `keyval` store) lists all projects and the active one.
+- Each project owns its 8 entries in the `project` store, prefixed `p:<id>:` (e.g. `p:<id>:worldInfo`), plus its own save game (`vn_creator_savegame:<id>`).
+- The project that existed before multi-project support keeps its original un-prefixed keys under the id `main` – no data migration needed.
+- Media (images, audio, video) stays in the shared `images` store. Which files belong to a project is derived by scanning the project data for media ids. Export only packs the media a project actually uses; deleting a project removes media no other project references.
+- Changes are autosaved (debounced); "Last Edited" is updated on every save of the project.
+- Importing a project file asks whether to **overwrite the open project** or **create a new project**.
+
 ### Exporting and Importing Projects
 
 Given the sheer scale of the new storage structures, a single `.json` file can no longer easily map a complete project. Instead, the Application executes a multi-step bundling protocol using `JSZip`:

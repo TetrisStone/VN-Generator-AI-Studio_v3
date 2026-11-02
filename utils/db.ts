@@ -128,3 +128,18 @@ export const getAllProjectKeys = async (): Promise<string[]> => {
   }
 };
 
+
+export const deleteProjectItem = async (key: string): Promise<void> => {
+  try {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(PROJECT_STORE, 'readwrite');
+      const request = tx.objectStore(PROJECT_STORE).delete(key);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    console.error("IndexedDB Project Delete Error:", err);
+    throw err;
+  }
+};

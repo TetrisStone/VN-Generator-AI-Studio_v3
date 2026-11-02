@@ -91,6 +91,19 @@ const dict = {
     'settings.exportfull': 'Export Full (incl. media)',
     'settings.exportlight': 'Export Light (data only)',
     'settings.import': 'Import Project (ZIP/JSON)',
+
+    'common.cancel': 'Cancel',
+    'project.new': 'New Project',
+    'project.delete': 'Delete Project',
+    'project.import.title': 'Import project',
+    'project.import.text': 'Do you want to overwrite the open project “{name}” with the contents of this file, or create a new project from it?',
+    'project.import.replace': 'Overwrite current',
+    'project.import.new': 'Create new project',
+    'project.import.done': 'Project loaded successfully!',
+    'project.import.failed': 'Failed to load project file.',
+    'project.delete.title': 'Delete project?',
+    'project.delete.text': 'The project “{name}” will be permanently deleted together with its save game and all media files that no other project uses. Tip: export it first if you might need it again.',
+    'project.delete.confirm': 'Delete permanently',
   },
   de: {
     'app.name': 'VN Creator',
@@ -178,6 +191,19 @@ const dict = {
     'settings.exportfull': 'Export Full (inkl. Medien)',
     'settings.exportlight': 'Export Light (nur Daten)',
     'settings.import': 'Projekt importieren (ZIP/JSON)',
+
+    'common.cancel': 'Abbrechen',
+    'project.new': 'Neues Projekt',
+    'project.delete': 'Projekt löschen',
+    'project.import.title': 'Projekt importieren',
+    'project.import.text': 'Soll das geöffnete Projekt „{name}“ mit dem Inhalt dieser Datei überschrieben werden, oder soll daraus ein neues Projekt entstehen?',
+    'project.import.replace': 'Aktuelles überschreiben',
+    'project.import.new': 'Neues Projekt anlegen',
+    'project.import.done': 'Projekt erfolgreich geladen!',
+    'project.import.failed': 'Projektdatei konnte nicht geladen werden.',
+    'project.delete.title': 'Projekt löschen?',
+    'project.delete.text': 'Das Projekt „{name}“ wird endgültig gelöscht, samt Spielstand und allen Mediendateien, die kein anderes Projekt nutzt. Tipp: Exportiere es vorher, falls du es noch einmal brauchst.',
+    'project.delete.confirm': 'Endgültig löschen',
   }
 } as const;
 
