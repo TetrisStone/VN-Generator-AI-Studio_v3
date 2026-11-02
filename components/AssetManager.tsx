@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { AssetItem, AssetCategory, Character, Scene, WorldMap, WorldInfo } from '../types';
 import { Button } from './ui/Button';
+import { PageHeader, EmptyState } from './ui/Ornate';
+import { useI18n } from '../utils/i18n';
 import { AsyncImage } from './ui/AsyncImage';
 import { saveImage, deleteImage } from '../utils/imageStorage';
 import { generateComfyImage, prepareComfyWorkflow } from '../services/comfyService';
@@ -179,6 +181,7 @@ export const AssetManager: React.FC<AssetManagerProps> = ({
   onUpdateScenes,
   onUpdateMaps,
 }) => {
+  const { t } = useI18n();
   const [subTab, setSubTab] = useState<'all' | 'scene_bg' | 'characters' | 'maps'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'unassigned' | 'assigned'>('all');
@@ -501,74 +504,66 @@ export const AssetManager: React.FC<AssetManagerProps> = ({
     <div className="flex flex-col h-full overflow-hidden bg-gray-950 text-gray-200">
       
       {/* Top Bar Header */}
-      <div className="p-4 md:p-6 border-b border-gray-800 bg-gray-900/60 flex flex-col md:flex-row justify-between md:items-center gap-4">
-        <div>
-          <h2 className="text-xl font-bold text-white flex items-center gap-2">
-            <ImageIcon className="text-emerald-500" size={24} /> Asset Library
-          </h2>
-          <p className="text-xs text-gray-400 mt-1">
-            Zentrales Medienlager für Szenen-Hintergründe, Charakter-Portraits und Weltkarten.
-          </p>
-        </div>
-
-        {/* Action Buttons */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Upload Button */}
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleUploadFile}
-            accept="image/*,audio/*"
-            className="hidden"
-          />
-          <Button
-            variant="secondary"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
-            className="text-xs py-2 px-3 flex items-center gap-2 border-gray-700 hover:border-emerald-500"
-          >
-            {isUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-            <span>Asset hochladen</span>
-          </Button>
-
-          {/* AI Generator Button */}
-          <Button
-            onClick={() => setShowAiModal(true)}
-            className="text-xs py-2 px-3 flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium"
-          >
-            <Sparkles size={14} />
-            <span>KI-Asset generieren</span>
-          </Button>
-        </div>
+      <div className="p-4 md:p-6 pb-0 md:pb-0">
+        <PageHeader
+          icon={<ImageIcon size={26} />}
+          title={t('nav.assets')}
+          subtitle={t('page.assets.sub')}
+          actions={<>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleUploadFile}
+              accept="image/*,audio/*"
+              className="hidden"
+            />
+            <Button
+              variant="secondary"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
+              className="text-xs py-2 px-3 flex items-center gap-2"
+            >
+              {isUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+              <span>{t('assets.upload')}</span>
+            </Button>
+            <Button
+              onClick={() => setShowAiModal(true)}
+              className="text-xs py-2 px-3 flex items-center gap-2"
+            >
+              <Sparkles size={14} />
+              <span>{t('assets.generate')}</span>
+            </Button>
+          </>}
+        />
       </div>
 
       {/* Sub-Navigation & Filters Section */}
-      <div className="p-4 border-b border-gray-800 bg-gray-900/30 space-y-3">
+      <div className="px-4 md:px-6 py-4 border-b border-gray-700 bg-gray-900/40 space-y-3">
         
         {/* Category Tabs */}
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-1 bg-gray-950 p-1 rounded-lg border border-gray-800">
+          <div className="flex items-center gap-1 bg-gray-950 p-1 border border-gray-700">
             <button
               onClick={() => setSubTab('all')}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${subTab === 'all' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`vn-item px-3 py-1.5 text-xs font-semibold transition-colors ${subTab === 'all' ? 'vn-item--on text-emerald-200' : 'text-gray-400 hover:text-white'}`}
             >
               Alle Assets ({assets.length})
             </button>
             <button
               onClick={() => setSubTab('scene_bg')}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 ${subTab === 'scene_bg' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`vn-item px-3 py-1.5 text-xs font-semibold transition-colors flex items-center gap-1.5 ${subTab === 'scene_bg' ? 'vn-item--on text-emerald-200' : 'text-gray-400 hover:text-white'}`}
             >
               <Monitor size={14} /> Scene-Backgrounds ({assets.filter(a => a.category === 'scene_bg').length})
             </button>
             <button
               onClick={() => setSubTab('characters')}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 ${subTab === 'characters' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`vn-item px-3 py-1.5 text-xs font-semibold transition-colors flex items-center gap-1.5 ${subTab === 'characters' ? 'vn-item--on text-emerald-200' : 'text-gray-400 hover:text-white'}`}
             >
               <Users size={14} /> Characters ({assets.filter(a => a.category === 'characters').length})
             </button>
             <button
               onClick={() => setSubTab('maps')}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 ${subTab === 'maps' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`vn-item px-3 py-1.5 text-xs font-semibold transition-colors flex items-center gap-1.5 ${subTab === 'maps' ? 'vn-item--on text-emerald-200' : 'text-gray-400 hover:text-white'}`}
             >
               <MapIcon size={14} /> Maps ({assets.filter(a => a.category === 'maps').length})
             </button>
@@ -694,25 +689,19 @@ export const AssetManager: React.FC<AssetManagerProps> = ({
       {/* Assets Main Grid Display */}
       <div className="flex-1 p-4 md:p-6 overflow-y-auto">
         {filteredAssets.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 text-gray-500 space-y-3">
-            <ImageIcon size={48} className="opacity-20 text-emerald-400" />
-            <p className="text-sm font-medium">Keine Assets in dieser Ansicht vorhanden.</p>
-            <p className="text-xs text-gray-600 text-center max-w-md">
-              Lade ein neues Asset hoch oder erstelle ein KI-Asset mit vordefinierten Tags, damit die KI es bei der automatischen Szenenerstellung zuordnen kann.
-            </p>
-            <Button
-              onClick={() => setShowAiModal(true)}
-              className="mt-2 text-xs py-2 px-4 bg-emerald-600 hover:bg-emerald-500 text-white"
-            >
-              <Sparkles size={14} className="mr-1.5" /> Erstes KI-Asset generieren
-            </Button>
-          </div>
+          <EmptyState
+            className="mt-6"
+            icon={<ImageIcon size={40} />}
+            title="Keine Assets in dieser Ansicht"
+            text="Lade ein neues Asset hoch oder erstelle ein KI-Asset mit vordefinierten Tags, damit die KI es bei der automatischen Szenenerstellung zuordnen kann."
+            action={<Button onClick={() => setShowAiModal(true)} className="text-xs py-2 px-4"><Sparkles size={14} className="mr-1.5" /> Erstes KI-Asset generieren</Button>}
+          />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
             {filteredAssets.map(asset => (
               <div
                 key={asset.id}
-                className="bg-gray-900 border border-gray-800 hover:border-gray-700 rounded-xl overflow-hidden flex flex-col justify-between shadow-lg transition-all group"
+                className="vn-item bg-gray-900 overflow-hidden flex flex-col justify-between shadow-lg transition-all group"
               >
                 {/* Image Container */}
                 <div className="aspect-video w-full bg-gray-950 relative overflow-hidden flex items-center justify-center">

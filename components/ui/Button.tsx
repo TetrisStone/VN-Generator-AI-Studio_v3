@@ -16,7 +16,7 @@ export const Button: React.FC<ButtonProps> = ({ variant = 'primary', className =
 
   return (
     <button 
-      className={`${baseStyles} ${variants[variant]} ${className}`} 
+      className={`${baseStyles} ${variants[variant]} ui-btn ui-btn--${variant} ${className}`} 
       {...props}
     >
       {children}

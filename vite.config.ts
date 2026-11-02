@@ -8,6 +8,8 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        // allow the online preview hosts of the sandbox
+        allowedHosts: ['.novita.ai'],
       },
       plugins: [react()],
       define: {

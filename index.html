@@ -6,7 +6,7 @@
     <title>VN Creator AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
-      // Gray + emerald are driven by CSS variables (see theme.css). Defaults equal the
+      // Gray, emerald and the accent colours below are driven by CSS variables (see theme.css). Defaults equal the
       // stock Tailwind palette (player / RPG / battle look unchanged); the editor shell
       // (.vn-theme) swaps them for the navy + gold palette.
       const scale = (name) => Object.fromEntries(
@@ -14,7 +14,11 @@
       );
       tailwind.config = {
         theme: { extend: {
-          colors: { gray: scale('gray'), emerald: scale('emerald') },
+          colors: {
+            gray: scale('gray'), emerald: scale('emerald'),
+            purple: scale('purple'), violet: scale('violet'), fuchsia: scale('fuchsia'), indigo: scale('indigo'),
+            sky: scale('sky'), cyan: scale('cyan'), blue: scale('blue'), amber: scale('amber')
+          },
           fontFamily: {
             display: ['Cinzel', 'serif'],
             serif: ['"Cormorant Garamond"', 'Georgia', 'serif']
