@@ -19,127 +19,29 @@ import { Loader2 } from 'lucide-react';
 import { extractImagesFromProject } from './utils/migrateImages';
 
 // Default Data for quick start
-const DEFAULT_CHARS: Character[] = [
-  { 
-    id: '1', 
-    name: 'Aiko', 
-    defaultDescription: 'A cheerful and curious android girl who loves learning about humans.', 
-    lore: 'Created by the Cyber-Lotus corporation, Aiko was discarded for being "too empathetic".',
-    playerRelation: 'Curious about the player, treats them like a mentor or older sibling.',
-    imageSrc: null,
-    mapSpriteSrc: null,
-    battleIdleSrc: null,
-    battlePrepSrc: null,
-    battleHitSrc: null,
-    battleScale: 1,
-    rpgColor: '#f472b6', 
-    bubbleColor: '#db2777', 
-    isItalic: false,
-    stats: {
-        pra: 3, str: 3, wid: 2, ges: 4, wil: 3,
-        hp: 18, maxHp: 18, limit: 6,
-        recoveryRate: 5,
-        weapon: { name: 'Energy Dagger', at: 5, mod: 2, dmg: 1, cap: 3 }
-    }
-  },
-  { 
-    id: '2', 
-    name: 'Kael', 
-    defaultDescription: 'A grumpy but skilled mechanic who fixes robots.', 
-    lore: 'An ex-military engineer who left the service after the Neon Wars.',
-    playerRelation: 'Distrustful at first, but respects competence. Owes the player a small favor.',
-    imageSrc: null,
-    mapSpriteSrc: null,
-    battleIdleSrc: null,
-    battlePrepSrc: null,
-    battleHitSrc: null,
-    battleScale: 1,
-    rpgColor: '#60a5fa', 
-    bubbleColor: '#2563eb', 
-    isItalic: false,
-    stats: {
-        pra: 2, str: 5, wid: 4, ges: 2, wil: 4,
-        hp: 24, maxHp: 24, limit: 12,
-        recoveryRate: 5,
-        weapon: { name: 'Giant Wrench', at: 2, mod: -1, dmg: 3, cap: null }
-    }
-  },
-  {
-    id: 'narrator',
-    name: 'Chronicler',
-    defaultDescription: 'The narrator of the story. Observes all but intervenes rarely.',
-    imageSrc: null,
-    mapSpriteSrc: null,
-    battleIdleSrc: null,
-    battlePrepSrc: null,
-    battleHitSrc: null,
-    battleScale: 1,
-    rpgColor: '#fbbf24', 
-    bubbleColor: '#d97706', 
-    isItalic: true
-  }
-];
-
 const DEFAULT_CHAPTERS: Chapter[] = [
   {
     id: 'ch1',
     order: 1,
-    name: 'Chapter 1: The Beginning',
-    description: 'The heroes meet in the workshop. The world is dark and industrial.'
+    name: 'Chapter 1',
+    description: ''
   }
 ];
 
-const DEFAULT_SCENES: Scene[] = [
-  {
-    id: 's1',
-    chapterId: 'ch1',
-    order: 1,
-    isMainScene: true,
-    name: 'The Workshop',
-    locationName: 'Kael\'s Garage',
-    backgroundSrc: null,
-    description: 'A cluttered workshop filled with robot parts. Kael is working on a workbench. Aiko is watching closely.',
-    aiInstructions: 'Kael is very busy and should act slightly annoyed by interruptions initially.',
-    sensoryDetails: 'The air smells of burnt ozone and machine oil. A rhythmic clanking comes from the back room.',
-    environmentDetails: 'Ein rechteckiger Raum mit Betonboden. An der Nordwand steht eine massive Werkbank aus Eichenholz. Links ist ein Regal voller alter Transistoren. Rechts eine schwere Stahltür.',
-    goal: 'Convince Kael to fix your broken radio.',
-    characters: [
-      { characterId: '1', roleInScene: 'Curious onlooker, wants to help but is clumsy.' },
-      { characterId: '2', roleInScene: 'Busy, easily annoyed, does not want to be disturbed.' }
-    ],
-    effects: [],
-    isRepeatable: false
-  }
-];
+const DEFAULT_SCENES: Scene[] = [];
+
+const DEFAULT_CHARS: Character[] = [];
 
 const DEFAULT_MAPS: WorldMap[] = [
-  {
-    id: 'map1',
-    name: 'Main City',
-    backgroundSrc: null,
-    spots: [
-      { id: 'spot1', type: 'character', characterId: '1', x: 50, y: 50 },
-    ]
-  }
+  { id: 'map1', name: 'World Map', backgroundSrc: null, spots: [] }
 ];
 
 const DEFAULT_BATTLES: Battle[] = [];
 
-// Default project (your real game content) — imported automatically on the
-// very first start of a fresh browser profile. The ZIP (>100 MB) can't live
-// in normal git, so it's hosted as a GitHub release asset with a stable URL.
-// Local dev keeps a copy in public/default-project/ (gitignored).
-const DEFAULT_PROJECT_RELEASE_URL = 'https://github.com/TetrisStone/VN-Generator-AI-Studio_v3/releases/download/default-project/vn-project-default.zip';
-const DEFAULT_PROJECT_LOCAL = 'default-project/vn-project-default.zip';
 const DEFAULT_WORLD: WorldInfo = { 
-    description: "A cyberpunk city ruled by corporations. Humans and androids live together but tensions are high.",
-    factions: [
-        { id: 'f1', name: 'Cyber-Lotus', description: 'The ruling mega-corporation controlling technology.' },
-        { id: 'f2', name: 'The Rust', description: 'A resistance group living in the undercity.' }
-    ],
-    loreLocations: [
-        { id: 'l1', name: 'Sector 7', description: 'The industrial district where the poor live.' }
-    ],
+    description: "",
+    factions: [],
+    loreLocations: [],
     diceConfig: { skins: {} },
     systemInstruction: '',
     llmProvider: 'gemini',
@@ -296,31 +198,7 @@ const App: React.FC = () => {
             }
         }
 
-        // First start on a fresh browser: pull the bundled default project
-        // (local dev copy first, then the repo release asset) once and
-        // import it — afterwards the data lives in IndexedDB like any own import
-        if (!hasData) {
-            try {
-                let defaultFile: File | null = null;
-                let resp = await fetch(DEFAULT_PROJECT_LOCAL, { cache: 'no-store' });
-                if (!resp.ok) resp = await fetch(DEFAULT_PROJECT_RELEASE_URL, { cache: 'no-store' });
-                if (resp.ok) {
-                    const blob = await resp.blob();
-                    if (blob.size > 0) {
-                        defaultFile = new File([blob], 'vn-project-default.zip', { type: 'application/zip' });
-                    }
-                } else {
-                    console.warn('Default project ZIP not reachable (relies on release asset; HTTP ' + resp.status + '). Falling back to built-in demo.');
-                }
-                if (defaultFile) {
-                    console.log('First start: importing default project bundle...');
-                    await handleImportProject(defaultFile, { silent: true });
-                    return;
-                }
-            } catch (e) {
-                console.warn('Default project auto-import failed:', e);
-            }
-        }
+        // Fresh browser: start with an empty project (no demo content, no auto-import)
 
         // Apply Data
         if (data) {
@@ -1127,7 +1005,8 @@ const App: React.FC = () => {
           />
       )}
 
-      <SettingsOverlay />
+      {/* Audio settings live in Editor > Settings; the floating gear stays only in game modes */}
+      {mode !== 'edit' && mode !== 'dungeon_test' && <SettingsOverlay />}
 
       <AnimatePresence mode="wait">
         {mode === 'edit' && (
@@ -1174,7 +1053,6 @@ const App: React.FC = () => {
               onImportSave={handleImportSave}
               hasSaveGame={hasSaveGame}
               onContinueGame={handleContinueGame}
-              onDungeonTest={() => setMode('dungeon_test')}
               onBuildDungeon={(id) => { setActiveDungeonBuildId(id); setEditorInitialTab('dungeons'); setMode('dungeon_test'); }}
               initialTab={editorInitialTab}
             />
