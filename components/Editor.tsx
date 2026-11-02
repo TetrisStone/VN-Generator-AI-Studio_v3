@@ -4,7 +4,9 @@ import { Button } from './ui/Button';
 import { Sidebar } from './layout/Sidebar';
 import { HomeView, ProjectSummary } from './HomeView';
 import { SettingsView } from './SettingsView';
-import { Trash, Sword, Scaling, Plus, Save, Play, Download, Upload, Monitor, Map as MapIcon, Users, Target, Book, Layout, MessageSquare, Unlock, Lock, Waypoints, Image as ImageIcon, XCircle, Terminal, MapPin, Heart, EyeOff, Video, Music, Sparkles, Loader2, ArrowLeft, Cpu, Check, FolderOpen, ChevronUp, ChevronDown, ExternalLink, X, Move, ChevronLeft, ChevronRight, Search, Compass, Boxes } from 'lucide-react';
+import { PageHeader, EmptyState, OrnateFrame } from './ui/Ornate';
+import { useI18n } from '../utils/i18n';
+import { Trash, Sword, Scaling, Plus, Save, Play, Download, Upload, Monitor, Map as MapIcon, Users, Target, Book, Layout, MessageSquare, Unlock, Lock, Waypoints, Image as ImageIcon, XCircle, Terminal, MapPin, Heart, EyeOff, Video, Music, Sparkles, Loader2, ArrowLeft, Cpu, Check, FolderOpen, ChevronUp, ChevronDown, ExternalLink, X, Move, ChevronLeft, ChevronRight, Search, Compass, Boxes, Castle } from 'lucide-react';
 import { CHARACTER_GROUPS, getCharacterGroupKey, getCharacterGroup, CharacterGroupKey } from '../utils/characterUtils';
 import { generateAutoScene, generateLoreTeaser } from '../services/geminiService';
 import { AsyncImage } from './ui/AsyncImage';
@@ -565,7 +567,7 @@ const ChapterEditor: React.FC<ChapterEditorProps> = ({
     };
 
     return (
-        <div className="space-y-6 max-w-3xl bg-gray-900/50 p-6 rounded-xl border border-gray-800">
+        <div className="space-y-6 max-w-3xl vn-panel bg-gray-900/80 p-6">
             <div className="flex justify-between items-start">
                 <div>
                     <div className="flex items-center gap-2">
@@ -782,7 +784,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
     };
 
     return (
-        <div className="space-y-6 max-w-2xl bg-gray-900/50 p-6 rounded-xl border border-gray-800">
+        <div className="space-y-6 max-w-2xl vn-panel bg-gray-900/80 p-6">
             <div className="flex justify-between items-start">
                 <div>
                      <div className="flex items-center gap-2 flex-wrap">
@@ -1507,7 +1509,7 @@ const SceneEditor: React.FC<SceneEditorProps> = ({ scene, allScenes, allBattles,
     };
 
     return (
-        <div className="space-y-6 max-w-3xl bg-gray-900/50 p-6 rounded-xl border border-gray-800">
+        <div className="space-y-6 max-w-3xl vn-panel bg-gray-900/80 p-6">
             <div className="flex justify-between items-center">
                 <h3 className="text-xl font-bold text-emerald-400">Editing: {scene.name}</h3>
                 <div className="flex gap-2">
@@ -1960,7 +1962,7 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
     };
 
     return (
-        <div className="space-y-6 max-w-3xl bg-gray-900/50 p-6 rounded-xl border border-gray-800">
+        <div className="space-y-6 max-w-3xl vn-panel bg-gray-900/80 p-6">
              <div className="flex justify-between items-center">
                 <h3 className="text-xl font-bold text-emerald-400">Editing: {map.name}</h3>
                 <button onClick={onDelete} className="text-red-500 hover:bg-red-900/20 p-2 rounded"><Trash size={18}/></button>
@@ -2280,7 +2282,7 @@ const BattleEditor: React.FC<BattleEditorProps> = ({ battle, characters, chapter
     };
 
     return (
-        <div className="space-y-6 max-w-3xl bg-gray-900/50 p-6 rounded-xl border border-gray-800">
+        <div className="space-y-6 max-w-3xl vn-panel bg-gray-900/80 p-6">
             <div className="flex justify-between items-center">
                 <h3 className="text-xl font-bold text-red-400">Editing: {battle.name}</h3>
                 <div className="flex gap-2">
@@ -2460,6 +2462,7 @@ interface EditorProps {
 export type { EditorTab };
 
 export const Editor: React.FC<EditorProps> = (props) => {
+    const { t } = useI18n();
     const [tab, setTab] = useState<EditorTab>(props.initialTab ?? 'home');
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [isGenerating, setIsGenerating] = useState(false);
@@ -2658,45 +2661,40 @@ export const Editor: React.FC<EditorProps> = (props) => {
                     />
                 )}
                 {tab === 'world' && (
-                    <div className="max-w-4xl space-y-8 overflow-y-auto h-full pr-4 pb-12">
-                        <div>
-                            <h2 className="text-2xl font-bold text-white mb-2 flex items-center gap-2"><Book size={24}/> World Settings</h2>
-                            <p className="text-gray-400 text-sm mb-6">Define the global context, lore, and rules for the AI Game Master.</p>
-                            
-                            <div className="space-y-4">
-                                <div>
-                                    <label className="text-xs font-bold text-gray-500 uppercase flex items-center gap-2 mb-1"><Book size={14}/> World Description</label>
-                                    <textarea 
-                                        className="w-full bg-gray-900 border border-gray-700 rounded p-3 h-32 text-white focus:border-emerald-500 outline-none" 
-                                        placeholder="General setting, atmosphere, time period, and major themes..."
-                                        value={props.worldInfo.description} 
-                                        onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, description: e.target.value })} 
-                                    />
-                                </div>
+                    <div className="max-w-5xl mx-auto w-full space-y-6 overflow-y-auto h-full pr-2 pb-12">
+                        <PageHeader icon={<Book size={26}/>} title={t('nav.world')} subtitle={t('page.world.sub')} />
 
-                                <div>
-                                    <label className="text-xs font-bold text-emerald-400 uppercase flex items-center gap-2 mb-1"><Terminal size={14}/> System Prompt (AI Instructions)</label>
-                                    <textarea 
-                                        className="w-full bg-gray-900 border border-emerald-900/50 rounded p-3 h-32 text-emerald-100 font-mono text-sm focus:border-emerald-500 outline-none" 
-                                        placeholder="Technical instructions for the AI (e.g. 'Speak in Shakespearean English', 'Always be sarcastic', 'Focus on horror elements')..."
-                                        value={props.worldInfo.systemInstruction || ''} 
-                                        onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, systemInstruction: e.target.value })} 
-                                    />
-                                </div>
-                            </div>
-                        </div>
+                        <OrnateFrame className="bg-gray-900/80 p-6 space-y-3">
+                            <h3 className="text-base font-semibold text-emerald-300 flex items-center gap-2 uppercase"><Book size={16}/> {t('world.desc')}</h3>
+                            <textarea
+                                className="w-full bg-gray-900 border border-gray-700 rounded p-3 h-32 text-white focus:border-emerald-500 outline-none"
+                                placeholder="General setting, atmosphere, time period, and major themes..."
+                                value={props.worldInfo.description}
+                                onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, description: e.target.value })}
+                            />
+                        </OrnateFrame>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 border-t border-gray-800 pt-8">
+                        <OrnateFrame className="bg-gray-900/80 p-6 space-y-3">
+                            <h3 className="text-base font-semibold text-emerald-300 flex items-center gap-2 uppercase"><Terminal size={16}/> {t('world.prompt')}</h3>
+                            <textarea
+                                className="w-full bg-gray-900 border border-gray-700 rounded p-3 h-32 text-emerald-100 font-mono text-sm focus:border-emerald-500 outline-none"
+                                placeholder="Technical instructions for the AI (e.g. 'Speak in Shakespearean English', 'Always be sarcastic', 'Focus on horror elements')..."
+                                value={props.worldInfo.systemInstruction || ''}
+                                onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, systemInstruction: e.target.value })}
+                            />
+                        </OrnateFrame>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
                              {/* LOCATIONS */}
-                             <div className="space-y-4">
+                             <OrnateFrame className="bg-gray-900/80 p-6 space-y-4">
                                  <div className="flex justify-between items-center">
-                                     <h3 className="text-lg font-bold text-emerald-400 flex items-center gap-2"><MapPin size={18}/> Key Locations</h3>
+                                     <h3 className="text-base font-semibold text-emerald-300 flex items-center gap-2 uppercase"><MapPin size={16}/> {t('world.locations')}</h3>
                                      <Button onClick={() => props.onUpdateWorldInfo({ ...props.worldInfo, loreLocations: [...props.worldInfo.loreLocations, { id: crypto.randomUUID(), name: 'New Location', description: '' }] })} className="text-xs px-2 py-1"><Plus size={14}/></Button>
                                  </div>
                                  <div className="space-y-3">
-                                     {props.worldInfo.loreLocations.length === 0 && <div className="text-gray-600 text-sm italic">No specific lore locations defined.</div>}
+                                     {props.worldInfo.loreLocations.length === 0 && <div className="vn-empty text-gray-400 vn-font-serif text-base italic px-4 py-6 text-center">{t('world.locations.empty')}</div>}
                                      {props.worldInfo.loreLocations.map((loc, i) => (
-                                         <div key={loc.id} className="bg-gray-900 border border-gray-700 rounded p-3 space-y-2.5 group">
+                                         <div key={loc.id} className="vn-item p-3 space-y-2.5 group">
                                              <div className="flex justify-between items-center">
                                                  <input 
                                                     className="bg-transparent font-bold text-emerald-200 border-b border-transparent focus:border-emerald-500 outline-none text-sm w-full"
@@ -2763,18 +2761,18 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                          </div>
                                      ))}
                                  </div>
-                             </div>
+                             </OrnateFrame>
 
                              {/* FACTIONS */}
-                             <div className="space-y-4">
+                             <OrnateFrame className="bg-gray-900/80 p-6 space-y-4">
                                  <div className="flex justify-between items-center">
-                                     <h3 className="text-lg font-bold text-amber-400 flex items-center gap-2"><Users size={18}/> Groups / Factions</h3>
+                                     <h3 className="text-base font-semibold text-emerald-300 flex items-center gap-2 uppercase"><Users size={16}/> {t('world.factions')}</h3>
                                      <Button onClick={() => props.onUpdateWorldInfo({ ...props.worldInfo, factions: [...props.worldInfo.factions, { id: crypto.randomUUID(), name: 'New Group', description: '' }] })} className="text-xs px-2 py-1"><Plus size={14}/></Button>
                                  </div>
                                  <div className="space-y-3">
-                                     {props.worldInfo.factions.length === 0 && <div className="text-gray-600 text-sm italic">No groups defined.</div>}
+                                     {props.worldInfo.factions.length === 0 && <div className="vn-empty text-gray-400 vn-font-serif text-base italic px-4 py-6 text-center">{t('world.factions.empty')}</div>}
                                      {props.worldInfo.factions.map((fac, i) => (
-                                         <div key={fac.id} className="bg-gray-900 border border-gray-700 rounded p-3 space-y-2.5 group">
+                                         <div key={fac.id} className="vn-item p-3 space-y-2.5 group">
                                              <div className="flex justify-between items-center">
                                                  <input 
                                                     className="bg-transparent font-bold text-amber-200 border-b border-transparent focus:border-amber-500 outline-none text-sm w-full"
@@ -2841,7 +2839,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                          </div>
                                      ))}
                                  </div>
-                             </div>
+                             </OrnateFrame>
                         </div>
                     </div>
                 )}
@@ -2884,10 +2882,12 @@ export const Editor: React.FC<EditorProps> = (props) => {
                     };
 
                     return (
-                        <div className="flex flex-col md:flex-row h-full gap-4 md:gap-6">
+                        <div className="flex flex-col h-full gap-5">
+<PageHeader icon={<Book size={26}/>} title={t('nav.chapters')} subtitle={t('page.chapters.sub')} />
+<div className="flex flex-col md:flex-row flex-1 min-h-0 gap-4 md:gap-6">
                             <div className={`w-full ${isSubSidebarOpen ? 'md:w-1/3' : 'md:w-0 md:hidden'} border-none md:border-r border-gray-800 pb-4 md:pb-0 md:pr-4 overflow-y-auto ${selectedId ? 'hidden md:block' : 'block'}`}>
                                 <div className="flex justify-between items-center mb-4">
-                                    <h2 className="text-xl font-bold text-white flex items-center gap-2"><Book size={20}/> Chapters</h2>
+                                    <span className="vn-list-label flex items-center gap-2"><Book size={14}/> {t('nav.chapters')}</span>
                                     <button onClick={() => setIsSubSidebarOpen(false)} className="hidden md:flex text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition-colors" title="Kapitel-Liste einklappen">
                                         <ChevronLeft size={18}/>
                                     </button>
@@ -2902,12 +2902,12 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                         description: ''
                                     }]);
                                     setSelectedId(id);
-                                }}><Plus size={14}/> Add Chapter</Button>
+                                }}><Plus size={14}/> {t('add.chapter')}</Button>
                                 <div className="space-y-2">
                                     {sortedChapters.map((c) => {
                                         const sceneCount = props.scenes.filter(s => s.chapterId === c.id).length;
                                         return (
-                                            <div key={c.id} onClick={() => setSelectedId(c.id)} className={`p-2.5 md:p-3 rounded-lg cursor-pointer border text-sm transition-colors ${selectedId === c.id ? 'bg-emerald-900/50 border-emerald-500' : 'bg-gray-900 border-gray-800 hover:bg-gray-800'}`}>
+                                            <div key={c.id} onClick={() => setSelectedId(c.id)} className={`p-2.5 md:p-3 rounded-lg cursor-pointer border text-sm transition-colors vn-item ${selectedId === c.id ? 'vn-item--on' : ''}`}>
                                                 <div className="flex items-center justify-between">
                                                     <div className="font-bold text-white truncate flex items-center gap-2">
                                                         <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800/80 px-1.5 py-0.5 rounded font-mono">
@@ -2953,18 +2953,21 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                         onReorderChapter={(dir) => handleReorderChapter(selectedId, dir)}
                                     />
                                 ) : (
-                                    <div className="h-full flex items-center justify-center text-gray-600 italic text-sm">Select a chapter from the list to edit its details and manage mapped scenes.</div>
+                                    <EmptyState className="h-full" icon={<Book size={32}/>} title={t('empty.select.title')} text={t('empty.chapters')} />
                                 )}
                             </div>
+                        </div>
                         </div>
                     );
                 })()}
 
                 {tab === 'chars' && (
-                    <div className="flex flex-col md:flex-row h-full gap-4 md:gap-6">
+                    <div className="flex flex-col h-full gap-5">
+<PageHeader icon={<Users size={26}/>} title={t('nav.chars')} subtitle={t('page.chars.sub')} />
+<div className="flex flex-col md:flex-row flex-1 min-h-0 gap-4 md:gap-6">
                         <div className={`w-full ${isSubSidebarOpen ? 'md:w-1/3' : 'md:w-0 md:hidden'} border-none md:border-r border-gray-800 pb-4 md:pb-0 md:pr-4 overflow-y-auto ${selectedId ? 'hidden md:block' : 'block'}`}>
                             <div className="flex justify-between items-center mb-3">
-                                <h2 className="text-lg font-bold text-white flex items-center gap-2"><Users size={18}/> Characters ({props.characters.length})</h2>
+                                <span className="vn-list-label flex items-center gap-2"><Users size={14}/> {t('nav.chars')} ({props.characters.length})</span>
                                 <button onClick={() => setIsSubSidebarOpen(false)} className="hidden md:flex text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition-colors" title="Charakter-Liste einklappen">
                                     <ChevronLeft size={18}/>
                                 </button>
@@ -3025,7 +3028,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                     alignment: initialAlignment
                                 }]);
                                 setSelectedId(id);
-                            }}><Plus size={14}/> Add Character</Button>
+                            }}><Plus size={14}/> {t('add.char')}</Button>
 
                             {/* Grouped Characters List */}
                             {(() => {
@@ -3041,9 +3044,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
 
                                 if (filteredCharacters.length === 0) {
                                     return (
-                                        <div className="p-4 bg-gray-900/50 border border-gray-800 rounded-lg text-center text-xs text-gray-500">
-                                            Keine Charaktere gefunden.
-                                        </div>
+                                        <div className="vn-empty p-4 text-center text-sm text-gray-400 vn-font-serif">{t('empty.list.chars')}</div>
                                     );
                                 }
 
@@ -3089,7 +3090,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                                                         <div
                                                                             key={c.id}
                                                                             onClick={() => setSelectedId(c.id)}
-                                                                            className={`p-2 rounded-lg cursor-pointer border text-xs flex items-center gap-2.5 transition-all ${isSelected ? 'bg-emerald-900/50 border-emerald-500 shadow-md' : 'bg-gray-900/80 border-gray-800/80 hover:bg-gray-800/90'}`}
+                                                                            className={`p-2 rounded-lg cursor-pointer border text-xs flex items-center gap-2.5 transition-all vn-item ${isSelected ? 'vn-item--on' : ''}`}
                                                                         >
                                                                             <div className="w-9 h-9 rounded-full bg-gray-800 border border-gray-700 flex-shrink-0 overflow-hidden flex items-center justify-center text-gray-400 font-bold">
                                                                                 {c.imageSrc ? (
@@ -3143,6 +3144,8 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                      />
                                  </div>
                              )}
+                            {!selectedId && <EmptyState className="h-full hidden md:flex" icon={<Users size={32}/>} title={t('empty.select.title')} text={t('empty.chars')} />}
+                        </div>
                         </div>
                     </div>
                 )}
@@ -3158,10 +3161,12 @@ export const Editor: React.FC<EditorProps> = (props) => {
                     });
 
                     return (
-                        <div className="flex flex-col md:flex-row h-full gap-4 md:gap-6">
+                        <div className="flex flex-col h-full gap-5">
+<PageHeader icon={<Monitor size={26}/>} title={t('nav.scenes')} subtitle={t('page.scenes.sub')} />
+<div className="flex flex-col md:flex-row flex-1 min-h-0 gap-4 md:gap-6">
                             <div className={`w-full ${isSubSidebarOpen ? 'md:w-1/3' : 'md:w-0 md:hidden'} border-none md:border-r border-gray-800 pb-4 md:pb-0 md:pr-4 overflow-y-auto ${selectedId ? 'hidden md:block' : 'block'}`}>
                                 <div className="flex justify-between items-center mb-3">
-                                    <h2 className="text-lg font-bold text-white flex items-center gap-2"><Monitor size={18}/> Scenes</h2>
+                                    <span className="vn-list-label flex items-center gap-2"><Monitor size={14}/> {t('nav.scenes')} ({props.scenes.length})</span>
                                     <button onClick={() => setIsSubSidebarOpen(false)} className="hidden md:flex text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition-colors" title="Szenen-Liste einklappen">
                                         <ChevronLeft size={18}/>
                                     </button>
@@ -3182,7 +3187,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                             isMainScene: true
                                         }]); 
                                         setSelectedId(id); 
-                                    }}><Plus size={14}/> Add Scene</Button>
+                                    }}><Plus size={14}/> {t('add.scene')}</Button>
                                     <Button 
                                         className="bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20 py-1.5" 
                                         title="Auto-Generate Scene from Story Log"
@@ -3209,7 +3214,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                             <div 
                                                 key={s.id} 
                                                 onClick={() => setSelectedId(s.id)} 
-                                                className={`p-2.5 md:p-3 rounded-lg cursor-pointer border text-sm transition-colors ${selectedId === s.id ? 'bg-emerald-900/50 border-emerald-500' : 'bg-gray-900 border-gray-800 hover:bg-gray-800'}`}
+                                                className={`p-2.5 md:p-3 rounded-lg cursor-pointer border text-sm transition-colors vn-item ${selectedId === s.id ? 'vn-item--on' : ''}`}
                                             >
                                                 <div className="flex items-center justify-between gap-2">
                                                     <div className="font-bold text-white truncate">{s.name}</div>
@@ -3249,22 +3254,26 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                          <SceneEditor key={selectedId} scene={props.scenes.find(s => s.id === selectedId)!} allScenes={props.scenes} allBattles={props.battles} allMaps={props.maps} characters={props.characters} chapters={props.chapters} worldInfo={props.worldInfo} assets={props.assets} onChange={(u) => props.onUpdateScenes(props.scenes.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateScenes(props.scenes.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
                                     </div>
                                 )}
+                            {!selectedId && <EmptyState className="h-full hidden md:flex" icon={<Monitor size={32}/>} title={t('empty.select.title')} text={t('empty.scenes')} />}
                             </div>
+                        </div>
                         </div>
                     );
                 })()}
                 
                 {tab === 'maps' && (
-                     <div className="flex flex-col md:flex-row h-full gap-4 md:gap-6">
+                     <div className="flex flex-col h-full gap-5">
+<PageHeader icon={<MapIcon size={26}/>} title={t('nav.maps')} subtitle={t('page.maps.sub')} />
+<div className="flex flex-col md:flex-row flex-1 min-h-0 gap-4 md:gap-6">
                         <div className={`w-full ${isSubSidebarOpen ? 'md:w-1/3' : 'md:w-0 md:hidden'} border-none md:border-r border-gray-800 pb-4 md:pb-0 md:pr-4 overflow-y-auto ${selectedId ? 'hidden md:block' : 'block'}`}>
                             <div className="flex justify-between items-center mb-3">
-                                <h2 className="text-lg font-bold text-white flex items-center gap-2"><MapIcon size={18}/> Maps</h2>
+                                <span className="vn-list-label flex items-center gap-2"><MapIcon size={14}/> {t('nav.maps')} ({props.maps.length})</span>
                                 <button onClick={() => setIsSubSidebarOpen(false)} className="hidden md:flex text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition-colors" title="Karten-Liste einklappen">
                                     <ChevronLeft size={18}/>
                                 </button>
                             </div>
-                             <Button className="w-full mb-4 py-1.5 text-sm" onClick={() => { const id = crypto.randomUUID(); props.onUpdateMaps([...props.maps, { id, name: 'New Map', backgroundSrc: null, spots: [] }]); setSelectedId(id); }}><Plus size={14}/> Add Map</Button>
-                             <div className="space-y-2">{props.maps.map(m => (<div key={m.id} onClick={() => setSelectedId(m.id)} className={`p-2 md:p-3 rounded cursor-pointer border text-sm ${selectedId === m.id ? 'bg-emerald-900/50 border-emerald-500' : 'bg-gray-900 border-gray-800 hover:bg-gray-800'}`}><div className="font-bold text-white">{m.name}</div></div>))}</div>
+                             <Button className="w-full mb-4 py-1.5 text-sm" onClick={() => { const id = crypto.randomUUID(); props.onUpdateMaps([...props.maps, { id, name: 'New Map', backgroundSrc: null, spots: [] }]); setSelectedId(id); }}><Plus size={14}/> {t('add.map')}</Button>
+                             <div className="space-y-2">{props.maps.map(m => (<div key={m.id} onClick={() => setSelectedId(m.id)} className={`p-2 md:p-3 rounded cursor-pointer border text-sm vn-item ${selectedId === m.id ? 'vn-item--on' : ''}`}><div className="font-bold text-white">{m.name}</div></div>))}</div>
                         </div>
                         <div className={`flex-1 overflow-y-auto ${!selectedId ? 'hidden md:block' : 'block'}`}>
                             {!isSubSidebarOpen && (
@@ -3280,36 +3289,35 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                     <MapEditor key={selectedId} map={props.maps.find(m => m.id === selectedId)!} scenes={props.scenes} characters={props.characters} battles={props.battles} allMaps={props.maps} dungeons={props.dungeonProjects} assets={props.assets} onChange={(u) => props.onUpdateMaps(props.maps.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateMaps(props.maps.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
                                 </div>
                             )}
+                            {!selectedId && <EmptyState className="h-full hidden md:flex" icon={<MapIcon size={32}/>} title={t('empty.select.title')} text={t('empty.maps')} />}
+                        </div>
                         </div>
                     </div>
                 )}
                 {tab === 'dungeons' && (
-                    <div className="h-full overflow-y-auto pb-8">
-                        <div className="flex flex-wrap gap-2 mb-4">
-                            <Button className="py-1.5 text-sm" onClick={createDungeonProject}><Plus size={14}/> Neuer Dungeon</Button>
-                            <Button
-                                variant="secondary"
-                                className="py-1.5 text-sm"
-                                onClick={importSandboxToDungeon}
-                                disabled={isImportingSandbox}
-                                title="Kopiert den Stand der alten 3D-Sandbox als eigenständiges Dungeon-Projekt"
-                            >
-                                <Upload size={14}/> {isImportingSandbox ? 'Importiere…' : 'Sandbox importieren'}
-                            </Button>
-                        </div>
+                    <div className="h-full overflow-y-auto pb-8 pr-2 space-y-5">
+                        <PageHeader
+                            icon={<Castle size={26}/>}
+                            title={t('nav.dungeons')}
+                            subtitle={t('page.dungeons.sub')}
+                            actions={<>
+                                <Button className="py-1.5 text-sm" variant="primary" onClick={createDungeonProject}><Plus size={14}/> {t('dungeons.new')}</Button>
+                                <Button
+                                    variant="secondary"
+                                    className="py-1.5 text-sm"
+                                    onClick={importSandboxToDungeon}
+                                    disabled={isImportingSandbox}
+                                    title="Kopiert den Stand der alten 3D-Sandbox als eigenständiges Dungeon-Projekt"
+                                >
+                                    <Upload size={14}/> {isImportingSandbox ? t('dungeons.importing') : t('dungeons.import')}
+                                </Button>
+                            </>}
+                        />
 
-                        <div className="mb-5 p-3 bg-sky-950/40 border border-sky-800/60 rounded-xl text-xs text-sky-200 leading-relaxed">
-                            <strong className="font-bold">Hinweis:</strong> „Bauen" öffnet die 3D-Bühne direkt mit diesem
-                            Dungeon-Projekt geladen — Chunks/Figuren hochladen &amp; platzieren, Änderungen werden automatisch
-                            zurück ins Projekt gespeichert. „Spielen" folgt in Phase 3 (Einstieg über Karten-Spots).
-                        </div>
+                        <div className="vn-notice p-3 text-sm leading-relaxed vn-font-serif text-base">{t('dungeons.hint')}</div>
 
                         {(props.dungeonProjects || []).length === 0 && (
-                            <div className="p-8 border border-dashed border-gray-700 rounded-xl text-center text-gray-500">
-                                <Boxes size={28} className="mx-auto mb-3 opacity-50"/>
-                                <p className="text-sm font-semibold text-gray-400 mb-1">Noch keine Dungeons angelegt</p>
-                                <p className="text-xs">Lege einen neuen Dungeon an — oder importiere deinen gebauten Sandbox-Dungeon.</p>
-                            </div>
+                            <EmptyState icon={<Boxes size={32}/>} title={t('dungeons.empty.title')} text={t('dungeons.empty.text')} />
                         )}
 
                         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -3317,7 +3325,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                 const chunkCount = d.placedChunks.length + (d.baseFloor ? 1 : 0);
                                 const figCount = d.placedNpcs.length;
                                 return (
-                                    <div key={d.id} className="p-4 bg-gray-900 border border-gray-800 rounded-xl hover:border-gray-600 transition-colors">
+                                    <OrnateFrame key={d.id} className="p-5 bg-gray-900/80">
                                         {renamingDungeonId === d.id ? (
                                             <div className="flex items-center gap-2 mb-2">
                                                 <input
@@ -3333,7 +3341,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                                             setRenamingDungeonId(null);
                                                         }
                                                     }}
-                                                    className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-2 py-1 text-sm text-white focus:outline-none focus:border-emerald-500"
+                                                    className="flex-1 bg-gray-950 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-emerald-500"
                                                 />
                                                 <button
                                                     onClick={() => {
@@ -3357,9 +3365,9 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                         )}
 
                                         <div className="flex flex-wrap gap-1.5 mb-3 text-[10px] font-mono">
-                                            <span className="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded border border-gray-700">{d.sections.length} Abschnitte</span>
-                                            <span className="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded border border-gray-700">{chunkCount} Chunks</span>
-                                            <span className="px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded border border-gray-700">{figCount} Figuren</span>
+                                            <span className="px-1.5 py-0.5 bg-gray-800 text-emerald-200 rounded-sm border border-gray-600">{d.sections.length} {t('dungeons.sections')}</span>
+                                            <span className="px-1.5 py-0.5 bg-gray-800 text-emerald-200 rounded-sm border border-gray-600">{chunkCount} {t('dungeons.chunks')}</span>
+                                            <span className="px-1.5 py-0.5 bg-gray-800 text-emerald-200 rounded-sm border border-gray-600">{figCount} {t('dungeons.figures')}</span>
                                         </div>
 
                                         <div className="flex items-center gap-2">
@@ -3367,13 +3375,13 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                                 className="flex-1 py-1 text-xs"
                                                 onClick={() => (props.onBuildDungeon ? props.onBuildDungeon(d.id) : props.onDungeonTest?.())}
                                                 title={props.onBuildDungeon ? 'Öffnet die Dungeon-Bühne geladen mit diesem Projekt' : 'Öffnet die Sandbox zum Bauen (Projekt-Anbindung folgt in Phase 2)'}
-                                            ><Play size={12}/> Bauen</Button>
+                                            ><Play size={12}/> {t('dungeons.build')}</Button>
                                             <Button
                                                 variant="secondary"
                                                 className="flex-1 py-1 text-xs"
                                                 disabled
                                                 title="Spielen kommt mit Phase 3 (Einstieg über Karten-Spot)"
-                                            ><Compass size={12}/> Spielen</Button>
+                                            ><Compass size={12}/> {t('dungeons.play')}</Button>
                                             <button
                                                 onClick={() => {
                                                     if (window.confirm(`Dungeon "${d.name}" wirklich löschen?`)) {
@@ -3384,23 +3392,25 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                                 title="Dungeon löschen"
                                             ><Trash size={14}/></button>
                                         </div>
-                                    </div>
+                                    </OrnateFrame>
                                 );
                             })}
                         </div>
                     </div>
                 )}
                 {tab === 'battles' && (
-                     <div className="flex flex-col md:flex-row h-full gap-4 md:gap-6">
+                     <div className="flex flex-col h-full gap-5">
+<PageHeader icon={<Target size={26}/>} title={t('nav.battles')} subtitle={t('page.battles.sub')} />
+<div className="flex flex-col md:flex-row flex-1 min-h-0 gap-4 md:gap-6">
                         <div className={`w-full ${isSubSidebarOpen ? 'md:w-1/3' : 'md:w-0 md:hidden'} border-none md:border-r border-gray-800 pb-4 md:pb-0 md:pr-4 overflow-y-auto ${selectedId ? 'hidden md:block' : 'block'}`}>
                             <div className="flex justify-between items-center mb-3">
-                                <h2 className="text-lg font-bold text-white flex items-center gap-2"><Target size={18}/> Battles</h2>
+                                <span className="vn-list-label flex items-center gap-2"><Target size={14}/> {t('nav.battles')} ({props.battles.length})</span>
                                 <button onClick={() => setIsSubSidebarOpen(false)} className="hidden md:flex text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition-colors" title="Kampf-Liste einklappen">
                                     <ChevronLeft size={18}/>
                                 </button>
                             </div>
-                             <Button className="w-full mb-4 py-1.5 text-sm" onClick={() => { const id = crypto.randomUUID(); props.onUpdateBattles([...props.battles, { id, name: 'New Battle', backgroundSrc: null, playerCharacterIds: [], enemyCharacterIds: [], isRepeatable: false }]); setSelectedId(id); }}><Plus size={14}/> Add Battle</Button>
-                             <div className="space-y-2">{props.battles.map(b => (<div key={b.id} onClick={() => setSelectedId(b.id)} className={`p-2 md:p-3 rounded cursor-pointer border text-sm ${selectedId === b.id ? 'bg-emerald-900/50 border-emerald-500' : 'bg-gray-900 border-gray-800 hover:bg-gray-800'}`}><div className="font-bold text-white">{b.name}</div></div>))}</div>
+                             <Button className="w-full mb-4 py-1.5 text-sm" onClick={() => { const id = crypto.randomUUID(); props.onUpdateBattles([...props.battles, { id, name: 'New Battle', backgroundSrc: null, playerCharacterIds: [], enemyCharacterIds: [], isRepeatable: false }]); setSelectedId(id); }}><Plus size={14}/> {t('add.battle')}</Button>
+                             <div className="space-y-2">{props.battles.map(b => (<div key={b.id} onClick={() => setSelectedId(b.id)} className={`p-2 md:p-3 rounded cursor-pointer border text-sm vn-item ${selectedId === b.id ? 'vn-item--on' : ''}`}><div className="font-bold text-white">{b.name}</div></div>))}</div>
                         </div>
                         <div className={`flex-1 overflow-y-auto ${!selectedId ? 'hidden md:block' : 'block'}`}>
                             {!isSubSidebarOpen && (
@@ -3416,6 +3426,8 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                     <BattleEditor key={selectedId} battle={props.battles.find(b => b.id === selectedId)!} characters={props.characters} chapters={props.chapters} allScenes={props.scenes} allBattles={props.battles} allMaps={props.maps} assets={props.assets} onChange={(u) => props.onUpdateBattles(props.battles.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateBattles(props.battles.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
                                 </div>
                             )}
+                            {!selectedId && <EmptyState className="h-full hidden md:flex" icon={<Target size={32}/>} title={t('empty.select.title')} text={t('empty.battles')} />}
+                        </div>
                         </div>
                     </div>
                 )}

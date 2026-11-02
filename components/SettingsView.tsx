@@ -4,7 +4,7 @@ import { WorldInfo } from '../types';
 import { getDefaultWorkflow } from '../services/comfyService';
 import { audioManager } from '../utils/audioManager';
 import { useI18n, Lang } from '../utils/i18n';
-import { OrnateFrame, FantasyButton, GoldRule } from './ui/Ornate';
+import { OrnateFrame, FantasyButton, Panel, PageHeader } from './ui/Ornate';
 
 interface SettingsViewProps {
   worldInfo: WorldInfo;
@@ -17,15 +17,7 @@ interface SettingsViewProps {
   onBack: () => void;
 }
 
-const Section: React.FC<{ title: string; icon: React.ReactNode; hint?: string; className?: string; children: React.ReactNode }> = ({ title, icon, hint, className = '', children }) => (
-  <OrnateFrame className={`bg-gray-900/80 p-6 space-y-4 ${className}`}>
-    <div>
-      <h3 className="text-base font-semibold text-emerald-300 flex items-center gap-2 uppercase">{icon}{title}</h3>
-      {hint && <p className="text-xs text-gray-400 mt-1">{hint}</p>}
-    </div>
-    {children}
-  </OrnateFrame>
-);
+const Section = Panel;
 
 export const SettingsView: React.FC<SettingsViewProps> = (viewProps) => {
   // The LLM / ComfyUI block below was moved 1:1 from the old Home tab and still reads `props.*`
@@ -51,14 +43,11 @@ export const SettingsView: React.FC<SettingsViewProps> = (viewProps) => {
 
   return (
     <div className="max-w-5xl mx-auto w-full space-y-6 overflow-y-auto h-full pb-12 pt-2 pr-2">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-3xl text-emerald-300 vn-font-display">{t('settings.title')}</h2>
-          <p className="text-gray-400 text-sm mt-1 vn-font-serif text-base">{t('settings.subtitle')}</p>
-        </div>
-        <FantasyButton inline icon={<ArrowLeft size={14} />} onClick={props.onBack}>{t('settings.back')}</FantasyButton>
-      </div>
-      <GoldRule />
+      <PageHeader
+        title={t('settings.title')}
+        subtitle={t('settings.subtitle')}
+        actions={<FantasyButton inline icon={<ArrowLeft size={14} />} onClick={props.onBack}>{t('settings.back')}</FantasyButton>}
+      />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <Section title={t('settings.language')} icon={<Globe size={16} />} hint={t('settings.language.hint')}>
