@@ -4,13 +4,12 @@ import { AnimatePresence, motion } from 'motion/react';
 import { Editor, EditorTab } from './components/Editor';
 import { Player } from './components/Player';
 import { RPGWorld } from './components/RPGWorld';
-import { BattleArena } from './components/BattleArena';
 import { StoryJournal } from './components/StoryJournal';
 import { SettingsOverlay } from './components/SettingsOverlay';
 import { DungeonTestView } from './components/DungeonTestView';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { audioManager } from './utils/audioManager';
-import { Character, Scene, GameSaveData, RPGState, WorldMap, ChatMessage, Battle, WorldInfo, Chapter, StoryLogEntry, AssetItem, DungeonProject } from './types';
+import { Character, Scene, GameSaveData, RPGState, WorldMap, ChatMessage, WorldInfo, Chapter, StoryLogEntry, AssetItem, DungeonProject } from './types';
 import { getItem, setItem } from './utils/db';
 import { loadImage, saveImage, listImageIds } from './utils/imageStorage';
 import {
@@ -42,13 +41,10 @@ const DEFAULT_MAPS: WorldMap[] = [
   { id: 'map1', name: 'World Map', backgroundSrc: null, spots: [] }
 ];
 
-const DEFAULT_BATTLES: Battle[] = [];
-
 const DEFAULT_WORLD: WorldInfo = { 
     description: "",
     factions: [],
     loreLocations: [],
-    diceConfig: { skins: {} },
     systemInstruction: '',
     llmProvider: 'gemini',
     llmModel: 'gemini-3.5-flash',
@@ -97,8 +93,23 @@ function dataURLToUint8Array(dataUrl: string): { array: Uint8Array; mimeType: st
   }
 }
 
+// Fields of the removed 2D dice battle system. Old projects still load; these
+// values are dropped (no conversion into the new BattleStats, section 6).
+const LEGACY_COMBAT_FIELDS = [
+  'stats', 'battleIdleSrc', 'battlePrepSrc', 'battleHitSrc', 'battleIdleScale', 'battleIdleOffsetX', 'battleIdleOffsetY',
+  'battlePrepScale', 'battlePrepOffsetX', 'battlePrepOffsetY', 'battleHitScale', 'battleHitOffsetX', 'battleHitOffsetY',
+  'battleScale', 'sfxWeaponHit', 'sfxWeaponMiss', 'sfxVoiceHit', 'sfxVoiceCrit', 'sfxVoiceDeath',
+  'woozySprites', 'finishSprite', 'finishAnimation',
+];
+const stripLegacyCombatFields = (c: any): Character => {
+  if (!c || typeof c !== 'object') return c;
+  const out = { ...c };
+  for (const k of LEGACY_COMBAT_FIELDS) delete out[k];
+  return out as Character;
+};
+
 const App: React.FC = () => {
-  const [mode, setMode] = useState<'edit' | 'rpg' | 'vn' | 'battle' | 'dungeon_test' | 'dungeon_play'>('edit');
+  const [mode, setMode] = useState<'edit' | 'rpg' | 'vn' | 'dungeon_test' | 'dungeon_play'>('edit');
   
   // Data State
   const [worldInfo, setWorldInfo] = useState<WorldInfo>(DEFAULT_WORLD);
@@ -106,7 +117,6 @@ const App: React.FC = () => {
   const [characters, setCharacters] = useState<Character[]>(DEFAULT_CHARS);
   const [scenes, setScenes] = useState<Scene[]>(DEFAULT_SCENES);
   const [maps, setMaps] = useState<WorldMap[]>(DEFAULT_MAPS);
-  const [battles, setBattles] = useState<Battle[]>(DEFAULT_BATTLES);
   const [dungeonProjects, setDungeonProjects] = useState<DungeonProject[]>([]);
   const [activeDungeonBuildId, setActiveDungeonBuildId] = useState<string | null>(null);
   const [playingDungeonId, setPlayingDungeonId] = useState<string | null>(null);
@@ -117,15 +127,14 @@ const App: React.FC = () => {
   const [rpgState, setRpgState] = useState<RPGState>({ 
     currentMapId: 'map1', 
     completedSceneIds: [],
-    completedBattleIds: [],
     unlockedIds: [],
     hiddenIds: [],
     ongoingScenes: {},
-    storyLog: [] // Init empty log
+    storyLog: [], // Init empty log
+    dungeonEnemyState: {}
   });
   
   const [activeSceneIndex, setActiveSceneIndex] = useState<number>(-1);
-  const [activeBattleId, setActiveBattleId] = useState<string | null>(null);
   const [vnHistory, setVnHistory] = useState<ChatMessage[]>([]); 
 
   const [hasSaveGame, setHasSaveGame] = useState(false);
@@ -160,7 +169,7 @@ const App: React.FC = () => {
   const [currentBgmUrl, setCurrentBgmUrl] = useState<string | undefined>(undefined);
 
   // Always-current snapshot for async persistence code
-  stateRef.current = { worldInfo, chapters, characters, scenes, maps, battles, assets, dungeonProjects };
+  stateRef.current = { worldInfo, chapters, characters, scenes, maps, assets, dungeonProjects };
   modeRef.current = mode;
 
   // Background Music Volume Sync
@@ -180,15 +189,16 @@ const App: React.FC = () => {
   // ---------------------------------------------------------------------------
   // Multi-project persistence
   // ---------------------------------------------------------------------------
-  const normalizeData = (data: ProjectData): Required<Pick<ProjectData, 'chapters' | 'characters' | 'scenes' | 'battles' | 'maps' | 'assets' | 'dungeonProjects'>> & { worldInfo: WorldInfo } => {
+  const normalizeData = (data: ProjectData): Required<Pick<ProjectData, 'chapters' | 'characters' | 'scenes' | 'maps' | 'assets' | 'dungeonProjects'>> & { worldInfo: WorldInfo } => {
     const w = data.worldInfo || {};
+    // Legacy fields of the old dice battle system are dropped (diceConfig)
+    const { diceConfig: _legacyDice, ...wRest } = w as any;
     const worldInfo: WorldInfo = {
       ...DEFAULT_WORLD,
-      ...w,
+      ...wRest,
       description: w.description || '',
       factions: w.factions || [],
       loreLocations: w.loreLocations || [],
-      diceConfig: w.diceConfig || { skins: {} },
       systemInstruction: w.systemInstruction || '',
       llmProvider: w.llmProvider || 'gemini',
       llmModel: w.llmModel || 'gemini-3.5-flash',
@@ -224,19 +234,26 @@ const App: React.FC = () => {
       relevantLocationIds: s.relevantLocationIds ?? undefined,
     }));
 
-    const battles: Battle[] = (data.battles || []).map((b: any) => ({ ...b, chapterId: b.chapterId || firstChapterId }));
 
     let maps: WorldMap[];
     if (data.maps && data.maps.length > 0) maps = data.maps;
     else if (data.mapConfig) maps = [{ ...data.mapConfig, id: 'map1', name: 'Default Map' }];
     else maps = structuredClone(DEFAULT_MAPS);
+    // Old 2D battle spots are removed (the battle system now lives in the dungeons)
+    maps = maps.map(m => ({
+      ...m,
+      spots: (m.spots || []).filter((sp: any) => sp.type !== 'battle').map(({ battleId: _b, ...sp }: any) => sp),
+    }));
+    // Old battle unlock effects are dropped
+    for (const sc of scenes) sc.effects = (sc.effects || []).filter((e: any) => e.type !== 'battle');
+    // Old combat fields on characters are ignored (no conversion, section 6)
+    const characters = (data.characters || []).map(stripLegacyCombatFields);
 
     return {
       worldInfo,
       chapters,
-      characters: data.characters || [],
+      characters,
       scenes,
-      battles,
       maps,
       assets: data.assets || [],
       dungeonProjects: data.dungeonProjects || [],
@@ -260,17 +277,15 @@ const App: React.FC = () => {
     setCharacters(snapshot.characters);
     setScenes(snapshot.scenes);
     setMaps(snapshot.maps);
-    setBattles(snapshot.battles);
     setAssets(snapshot.assets);
     setDungeonProjects(snapshot.dungeonProjects);
     // leave any running game session behind
     setRpgState({
       currentMapId: snapshot.maps[0]?.id || 'map1',
-      completedSceneIds: [], completedBattleIds: [], unlockedIds: [], hiddenIds: [], ongoingScenes: {}, storyLog: []
+      completedSceneIds: [], unlockedIds: [], hiddenIds: [], ongoingScenes: {}, storyLog: [], dungeonEnemyState: {}
     });
     setVnHistory([]);
     setActiveSceneIndex(-1);
-    setActiveBattleId(null);
     setMode('edit');
   };
 
@@ -457,7 +472,7 @@ const App: React.FC = () => {
     const s = stateRef.current;
     const a = appliedRef.current;
     if (a && a.worldInfo === s.worldInfo && a.chapters === s.chapters && a.characters === s.characters && a.scenes === s.scenes
-        && a.maps === s.maps && a.battles === s.battles && a.assets === s.assets && a.dungeonProjects === s.dungeonProjects) return;
+        && a.maps === s.maps && a.assets === s.assets && a.dungeonProjects === s.dungeonProjects) return;
     const cover = s.worldInfo?.projectMeta?.coverImageId ?? null;
     const prev = prevCoverRef.current;
     if (prev && prev.id === activeIdRef.current && prev.cover && prev.cover !== cover) pendingPruneRef.current.add(prev.cover);
@@ -465,7 +480,7 @@ const App: React.FC = () => {
     if (modeRef.current === 'edit') touchRef.current = true;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => { flushSave().catch(console.error); }, 500);
-  }, [worldInfo, chapters, characters, scenes, maps, battles, assets, dungeonProjects]);
+  }, [worldInfo, chapters, characters, scenes, maps, assets, dungeonProjects]);
 
   // Don't lose the last edits when the tab is hidden or closed
   useEffect(() => {
@@ -485,7 +500,7 @@ const App: React.FC = () => {
   const handleExportProject = async (includeMedia: boolean = true) => {
     setIsProcessing(true);
     try {
-      const data = { worldInfo, chapters, characters, scenes, maps, battles, dungeonProjects, assets };
+      const data = { worldInfo, chapters, characters, scenes, maps, dungeonProjects, assets };
       // Only media that this project actually references (the shared store may hold other projects' files)
       const ownMedia = await mediaRefsOf(data);
       
@@ -790,15 +805,14 @@ const App: React.FC = () => {
         currentChapterId: firstChapterId,
         currentMapId: initialMapId, 
         completedSceneIds: [], 
-        completedBattleIds: [],
         unlockedIds: [],
         hiddenIds: [],
         ongoingScenes: {},
-        storyLog: [] 
+        storyLog: [],
+        dungeonEnemyState: {}
     });
     setVnHistory([]);
     setActiveSceneIndex(-1);
-    setActiveBattleId(null);
     setMode('rpg');
   };
 
@@ -811,7 +825,7 @@ const App: React.FC = () => {
         setRpgState({ 
             ...savedGame.rpgState, 
             currentMapId: safeMapId,
-            completedBattleIds: savedGame.rpgState.completedBattleIds || [],
+            dungeonEnemyState: savedGame.rpgState.dungeonEnemyState || {},
             unlockedIds: savedGame.rpgState.unlockedIds || [], 
             hiddenIds: savedGame.rpgState.hiddenIds || [], 
             ongoingScenes: savedGame.rpgState.ongoingScenes || {},
@@ -862,7 +876,7 @@ const App: React.FC = () => {
       return true;
   };
 
-  const handleInteraction = (type: 'scene'|'transition'|'character'|'battle'|'dungeon', id: string) => {
+  const handleInteraction = (type: 'scene'|'transition'|'character'|'dungeon', id: string) => {
       // Check if locked/hidden first
       if (rpgState.hiddenIds.includes(id)) return;
 
@@ -895,12 +909,6 @@ const App: React.FC = () => {
              alert(`${char.name} has nothing new to say right now.`);
           }
 
-      } else if (type === 'battle') {
-         const battle = battles.find(b => b.id === id);
-         if (battle) {
-             setActiveBattleId(battle.id);
-             setMode('battle');
-         }
       } else if (type === 'dungeon') {
          // Phase 3: dungeon entrance on the world map
          const dungeon = dungeonProjects.find(d => d.id === id);
@@ -998,43 +1006,6 @@ const App: React.FC = () => {
       setMode('rpg');
   };
 
-  const handleBattleFinish = (won: boolean) => {
-      if (!activeBattleId) return;
-      const battle = battles.find(b => b.id === activeBattleId);
-
-      if (won && battle) {
-          const newCompleted = [...rpgState.completedBattleIds];
-          if (!newCompleted.includes(battle.id)) newCompleted.push(battle.id);
-
-          const newUnlockedIds = [...rpgState.unlockedIds];
-          const newHiddenIds = [...rpgState.hiddenIds];
-
-          // Apply Win Effects
-          if (battle.onWinEffect) {
-              battle.onWinEffect.forEach(effect => {
-                  const targetId = effect.targetId;
-                  if (effect.action === 'unlock') {
-                      if (!newUnlockedIds.includes(targetId)) newUnlockedIds.push(targetId);
-                      const hideIdx = newHiddenIds.indexOf(targetId);
-                      if (hideIdx > -1) newHiddenIds.splice(hideIdx, 1);
-                  } else if (effect.action === 'lock') {
-                      if (!newHiddenIds.includes(targetId)) newHiddenIds.push(targetId);
-                  }
-              });
-          }
-
-          setRpgState(prev => ({ 
-              ...prev, 
-              completedBattleIds: newCompleted,
-              unlockedIds: newUnlockedIds,
-              hiddenIds: newHiddenIds 
-          }));
-      }
-
-      setMode('rpg');
-      setActiveBattleId(null);
-  };
-
   const handleUpdateJournal = (entryId: string, newSummary: string) => {
       const updatedLog = rpgState.storyLog.map(entry => 
           entry.id === entryId ? { ...entry, summary: newSummary } : entry
@@ -1045,7 +1016,6 @@ const App: React.FC = () => {
   };
 
   const activeMap = maps.find(m => m.id === rpgState.currentMapId) || maps[0];
-  const activeBattle = battles.find(b => b.id === activeBattleId);
 
   // Background Music Logic
   useEffect(() => {
@@ -1055,8 +1025,6 @@ const App: React.FC = () => {
         targetBgm = activeMap?.bgmUrl;
     } else if (mode === 'vn' && activeSceneIndex >= 0) {
         targetBgm = scenes[activeSceneIndex]?.bgmUrl || activeMap?.bgmUrl;
-    } else if (mode === 'battle' && activeBattle) {
-        targetBgm = activeBattle.bgmUrl || activeMap?.bgmUrl;
     }
 
     console.log(`BGM Logic - mode: ${mode}, currentBgmUrl: ${currentBgmUrl}, targetBgm: ${targetBgm}`);
@@ -1068,7 +1036,7 @@ const App: React.FC = () => {
     } else if (mode === 'edit' && currentBgmUrl) {
         setCurrentBgmUrl(undefined);
     }
-  }, [mode, activeMap, activeSceneIndex, activeBattle, scenes, currentBgmUrl]);
+  }, [mode, activeMap, activeSceneIndex, scenes, currentBgmUrl]);
 
   const currentResolvedBgm = useRef<string | null>(null);
 
@@ -1149,7 +1117,6 @@ const App: React.FC = () => {
               characters={characters}
               scenes={scenes}
               maps={maps}
-              battles={battles}
               assets={assets}
               storyLog={rpgState.storyLog} // PASS STORY LOG TO EDITOR
               onUpdateWorldInfo={setWorldInfo}
@@ -1157,7 +1124,6 @@ const App: React.FC = () => {
               onUpdateCharacters={setCharacters}
               onUpdateScenes={setScenes}
               onUpdateMaps={setMaps}
-              onUpdateBattles={setBattles}
               dungeonProjects={dungeonProjects}
               onUpdateDungeonProjects={setDungeonProjects}
               onUpdateAssets={setAssets}
@@ -1195,7 +1161,6 @@ const App: React.FC = () => {
               mapConfig={activeMap}
               maps={maps}
               scenes={scenes}
-              battles={battles}
               dungeons={dungeonProjects}
               initialState={rpgState}
               onInteraction={handleInteraction}
@@ -1206,26 +1171,6 @@ const App: React.FC = () => {
               }}
               onExit={() => setMode('edit')}
               onOpenJournal={() => setShowJournal(true)}
-            />
-          </motion.div>
-        )}
-
-        {mode === 'battle' && activeBattle && (
-          <motion.div 
-            className="w-full h-screen"
-            key={`battle-${activeBattleId}`}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.6 }}
-          >
-            <BattleArena 
-               battle={activeBattle}
-               characters={characters}
-               worldInfo={worldInfo}
-               onWin={() => handleBattleFinish(true)}
-               onLose={() => handleBattleFinish(false)}
-               onExit={() => { setActiveBattleId(null); setMode('rpg'); }}
             />
           </motion.div>
         )}
@@ -1305,6 +1250,15 @@ const App: React.FC = () => {
                 scenes={scenes}
                 dungeonProject={dungeonProjects.find(d => d.id === playingDungeonId) || undefined}
                 playMode
+                enemyState={rpgState.dungeonEnemyState || {}}
+                onEnemyStateChange={(patch) => {
+                  // Persist kraft / defeated per `${dungeonId}:${placementId}` (section 12)
+                  setRpgState(prev => {
+                    const next = { ...prev, dungeonEnemyState: { ...(prev.dungeonEnemyState || {}), ...patch } };
+                    handleSaveGameInternal(next, null).catch(err => console.warn('battle state save failed:', err));
+                    return next;
+                  });
+                }}
                 onSceneStart={(sceneId) => {
                   const sc = scenes.find(s => s.id === sceneId);
                   if (sc) startScene(sc);

@@ -5,7 +5,7 @@ export interface SceneCharacterConfig {
 }
 
 export interface SceneEffect {
-  type: 'scene' | 'transition' | 'battle';
+  type: 'scene' | 'transition';
   targetId: string;
   action: 'unlock' | 'lock';
 }
@@ -42,25 +42,18 @@ export interface RelationshipConfig {
     keyMoments?: RelationshipKeyMoment[];
 }
 
-export interface WeaponConfig {
-    name: string;
-    at: number;
-    mod: number;
-    dmg: number;
-    cap: number | null;
-}
-
-export interface CombatStats {
-    pra: number;
-    str: number;
-    wid: number;
-    ges: number;
-    wil: number;
-    hp: number;
-    maxHp: number;
-    limit: number;
-    recoveryRate: number;
-    weapon: WeaponConfig;
+/**
+ * Battle values of the new turn-based battle system (stage 1).
+ * Missing values fall back to the defaults in battle/config.ts.
+ */
+export interface BattleStats {
+  maxHp: number;
+  atk: number;
+  def: number;
+  ini: number;          // sight range in sub-tiles
+  maxKraft?: number;    // enemies only
+  kraftResist?: number; // 0..1, enemies only (e.g. bosses 0.5)
+  abilityId?: string;
 }
 
 export interface CharacterImagePrompts {
@@ -109,37 +102,11 @@ export interface Character {
   playerRelation?: string;
   relationship?: RelationshipConfig;
 
-  // Combat / RPG Stats
-  stats?: CombatStats;
-  
-  // Battle Visuals
-  battleIdleSrc?: string | null;
-  battlePrepSrc?: string | null;
-  battleHitSrc?: string | null;
-  battleIdleScale?: number;
-  battleIdleOffsetX?: number;
-  battleIdleOffsetY?: number;
-  
-  battlePrepScale?: number;
-  battlePrepOffsetX?: number;
-  battlePrepOffsetY?: number;
-  
-  battleHitScale?: number;
-  battleHitOffsetX?: number;
-  battleHitOffsetY?: number;
-  
-  battleScale?: number; // fallback
-
-  // Battle Audio SFX
-  sfxWeaponHit?: string | null;
-  sfxWeaponMiss?: string | null;
-  sfxVoiceHit?: string | null;
-  sfxVoiceCrit?: string | null;
-  sfxVoiceDeath?: string | null;
-
-  woozySprites?: string[];
-  finishSprite?: string | null;
-  finishAnimation?: string[];
+  // Battle (new system). Old fields (stats, battle sprites/SFX) of legacy
+  // projects are ignored and stripped on load.
+  battleStats?: BattleStats;
+  /** Marks the Spark companion (cannot act, heals / drains Kraft) */
+  isSpark?: boolean;
 
   // 3D Model Visuals (GLB)
   model3dSrc?: string | null;
@@ -235,7 +202,7 @@ export interface ProjectMeta {
   lastEdited?: number;
 }
 
-export type EditorTab = 'home' | 'settings' | 'world' | 'chapters' | 'chars' | 'scenes' | 'maps' | 'dungeons' | 'battles' | 'assets';
+export type EditorTab = 'home' | 'settings' | 'world' | 'chapters' | 'chars' | 'scenes' | 'maps' | 'dungeons' | 'assets';
 
 export interface WorldInfo {
   projectMeta?: ProjectMeta;
@@ -243,7 +210,6 @@ export interface WorldInfo {
   factions: Faction[];
   loreLocations: WorldLocation[];
   systemInstruction?: string;
-  diceConfig?: { skins: Record<number, string[]> };
   llmProvider?: 'gemini' | 'ollama' | 'openai';
   llmModel?: string;
   ollamaUrl?: string;
@@ -269,10 +235,9 @@ export interface MapSpot {
   id: string;
   x: number;
   y: number;
-  type: 'scene' | 'character' | 'battle' | 'transition' | 'dungeon';
+  type: 'scene' | 'character' | 'transition' | 'dungeon';
   sceneId?: string;
   characterId?: string;
-  battleId?: string;
   targetMapId?: string;
   dungeonId?: string;
   visualCharacterId?: string;
@@ -284,18 +249,6 @@ export interface WorldMap {
   backgroundSrc: string | null;
   bgmUrl?: string;
   spots: MapSpot[];
-}
-
-export interface Battle {
-  id: string;
-  name: string;
-  chapterId?: string;
-  backgroundSrc: string | null;
-  playerCharacterIds: string[];
-  enemyCharacterIds: string[];
-  isRepeatable: boolean;
-  bgmUrl?: string;
-  onWinEffect?: SceneEffect[];
 }
 
 export interface StoryLogEntry {
@@ -314,11 +267,12 @@ export interface RPGState {
     currentMapId: string;
     currentChapterId?: string;
     completedSceneIds: string[];
-    completedBattleIds: string[];
     unlockedIds: string[];
     hiddenIds: string[];
     ongoingScenes: Record<string, ChatMessage[]>;
     storyLog: StoryLogEntry[]; // New history field
+    /** Persistent dungeon enemy state, key `${dungeonId}:${placementId}` */
+    dungeonEnemyState?: Record<string, { kraft?: number; defeated?: boolean }>;
 }
 
 export interface GameState {
@@ -337,8 +291,6 @@ export interface GameSaveData {
     characterState?: Record<string, Partial<Character>>;
     timestamp: number;
 }
-
-export type Zone = 'head' | 'torso' | 'arm' | 'leg';
 
 // ==================== ASSET LIBRARY TYPES ====================
 export type AssetCategory = 'maps' | 'scene_bg' | 'characters';
@@ -364,7 +316,7 @@ export interface AssetItem {
   characterMeta?: CharacterAssetMeta;
   locationMeta?: LocationAssetMeta;
   assignedTo?: {
-    type: 'character_idle' | 'character_emotion' | 'character_sprite' | 'character_map' | 'scene_bg' | 'map_bg' | 'battle_bg';
+    type: 'character_idle' | 'character_emotion' | 'character_sprite' | 'character_map' | 'scene_bg' | 'map_bg';
     targetId: string;
     targetName?: string;
     emotionName?: string;
@@ -429,6 +381,8 @@ export interface DungeonNpcPlacement {
   characterId?: string;
   /** Phase 3: scene id opened when interacting with a neutral figure */
   sceneId?: string;
+  /** Battle: enemies sharing a groupId fight together */
+  groupId?: string;
 }
 
 /** Base chunk/character GLB mounted at the grid origin (incl. user config) */

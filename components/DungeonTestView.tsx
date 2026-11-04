@@ -11,6 +11,9 @@ import {
 import { Character, Scene, DungeonProject, DungeonBaseGLB } from '../types';
 import { getItem, setItem as setKeyvalItem } from '../utils/db';
 import { loadImage } from '../utils/imageStorage';
+import { Party, Animator } from './battle/figures';
+import { useBattleScene, type BattleBridge, type EnemyStateMap } from './battle/useBattleScene';
+import { BattleOverlay } from './battle/BattleOverlay';
 
 interface DungeonTestViewProps {
   onExit: () => void;
@@ -23,6 +26,9 @@ interface DungeonTestViewProps {
   playMode?: boolean;
   /** Phase 3: fired when the player talks to a neutral figure bound to a scene */
   onSceneStart?: (sceneId: string) => void;
+  /** Battle: persistent enemy state (RPGState.dungeonEnemyState) */
+  enemyState?: EnemyStateMap;
+  onEnemyStateChange?: (patch: EnemyStateMap) => void;
 }
 
 interface TileCoord {
@@ -151,6 +157,8 @@ interface PlacedNpcInstance {
   characterId?: string;
   /** Phase 3: scene opened when the player presses E next to this figure */
   sceneId?: string;
+  /** Battle: enemies with the same groupId fight together */
+  groupId?: string;
 }
 
 const CHUNK_LIBRARY_KEY = 'dungeon_chunk_library';
@@ -609,7 +617,7 @@ function createStylizedDoorCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
-export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, characters = [], scenes = [], dungeonProject, onSaveProject, playMode, onSceneStart }) => {
+export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, characters = [], scenes = [], dungeonProject, onSaveProject, playMode, onSceneStart, enemyState, onEnemyStateChange }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const charFileInputRef = useRef<HTMLInputElement>(null);
   const floorFileInputRef = useRef<HTMLInputElement>(null);
@@ -626,6 +634,19 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   useEffect(() => {
     charactersRef.current = characters;
   }, [characters]);
+
+  // ---- Battle system (stage 1): party chain + battle director -----------
+  const partyRef = useRef<Party | null>(null);
+  const { ui: battleUi, api: battleApi, attach: attachBattle, detach: detachBattle, directorRef: battleRef } = useBattleScene();
+  const enemyStateRef = useRef<EnemyStateMap>(enemyState ?? {});
+  const onEnemyStateChangeRef = useRef(onEnemyStateChange);
+  useEffect(() => {
+    onEnemyStateChangeRef.current = onEnemyStateChange;
+  });
+  const dungeonIdOf = () => dungeonProjectRef.current?.id ?? 'sandbox';
+  // Defeated enemies stay gone permanently (play mode only)
+  const isEnemyGone = (n: { id: string; kind: string }) =>
+    playModeRef.current && n.kind === 'enemy' && !!enemyStateRef.current[`${dungeonIdOf()}:${n.id}`]?.defeated;
   // Wraps the keyval writer: no sandbox writes while bound to a project
   const setItem = useCallback((key: string, value: unknown) => {
     if (isProjectModeRef.current) return Promise.resolve();
@@ -662,6 +683,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     let bestD = Infinity;
     for (const n of placedNpcsRef.current) {
       if ((n.sectionId ?? 'root') !== sect) continue;
+      if (isEnemyGone(n) || battleRef.current?.active) continue;
       const d = Math.hypot(n.col - cur.col, n.row - cur.row);
       if (d <= 1.5 && d < bestD) { bestD = d; best = n; }
     }
@@ -852,7 +874,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       const t = interactTargetRef.current;
       if (!t) return;
       if (t.kind === 'enemy') {
-        showPortalHint('Kämpfen: kommt direkt nach dem Battle-Ersatz — hier gibt es (noch) nichts zu holen.');
+        // E next to an enemy: the heroes strike first
+        battleRef.current?.engage(t.id);
         return;
       }
       if (t.sceneId) {
@@ -881,6 +904,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     setPlacedNpcs(next);
     setItem(NPC_PLACEMENTS_KEY, next).catch(err => console.warn('npc scene save failed:', err));
     if (interactTargetRef.current?.id === npcId) updateInteractableRef.current();
+  }, []);
+  const applyNpcGroup = useCallback((npcId: string, groupId: string) => {
+    const g = groupId.trim() || undefined;
+    const next = placedNpcsRef.current.map(p => (p.id === npcId ? { ...p, groupId: g } : p));
+    placedNpcsRef.current = next;
+    setPlacedNpcs(next);
+    setItem(NPC_PLACEMENTS_KEY, next).catch(err => console.warn('npc group save failed:', err));
   }, []);
   const removeSelectedNpc = useCallback(() => {
     if (!selectedNpcId) return;
@@ -3072,6 +3102,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       }
       // From here on every edit flows into the project save-back
       restoredInitRef.current = true;
+      // Party chain stands next to the leader once the floor exists
+      partyRef.current?.resetAround(currentTileRef.current);
       // Play mode: any figure standing next to the spawn tile is interactable
       if (playModeRef.current) updateInteractableRef.current();
     };
@@ -3302,12 +3334,16 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       inner.position.y = surfaceY;
 
       holder.rotation.y = (inst.rotationY * Math.PI) / 180;
-      holder.visible = (inst.sectionId ?? 'root') === activeSectionRef.current;
+      holder.visible = (inst.sectionId ?? 'root') === activeSectionRef.current && !isEnemyGone(inst);
       holder.userData = {
         npcId: inst.id,
         libraryId: inst.libraryId,
         npcKind: inst.kind,
-        sectionId: inst.sectionId ?? 'root'
+        sectionId: inst.sectionId ?? 'root',
+        // Battle: animation access for attack / hit / dizzy clips
+        clips: gltf.animations,
+        mixer: null as THREE.AnimationMixer | null,
+        idleAction: null as THREE.AnimationAction | null
       };
       placedNpcsGroup.add(holder);
 
@@ -3315,7 +3351,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       const idleClip = gltf.animations.find(c => /idle|stand|wait|pose/i.test(c.name)) || gltf.animations[0];
       if (idleClip) {
         const mixer = new THREE.AnimationMixer(model);
-        mixer.clipAction(idleClip).play();
+        const idleAction = mixer.clipAction(idleClip);
+        idleAction.play();
+        holder.userData.mixer = mixer;
+        holder.userData.idleAction = idleAction;
         npcMixersRef.current = [
           ...npcMixersRef.current.filter(x => x.id !== inst.id),
           { id: inst.id, mixer }
@@ -3559,7 +3598,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       });
       placedNpcsGroup.children.forEach(child => {
         const childSect = (child.userData?.sectionId as string) ?? 'root';
-        child.visible = childSect === sectionId;
+        const gone = isEnemyGone({ id: child.userData?.npcId, kind: child.userData?.npcKind });
+        child.visible = childSect === sectionId && !gone;
       });
       // Base chunks permanently belong to the root section
       if (customFloorGroupRef.current) customFloorGroupRef.current.visible = sectionId === 'root';
@@ -3631,6 +3671,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         }
       }
       refocusCamera(characterPosRef.current);
+      // Party chain re-forms around the leader in the new section
+      partyRef.current?.resetAround(currentTileRef.current);
       // While linking doors the pick must survive section switching
       if (editModeRef.current !== 'link') setLinkPickName(null);
       // Marker shells must follow the freshly visible section
@@ -3889,7 +3931,19 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       camera.lookAt(camTarget);
     };
 
+    const eventNdc = (e: MouseEvent) => {
+      const r = renderer.domElement.getBoundingClientRect();
+      return { x: ((e.clientX - r.left) / r.width) * 2 - 1, y: -((e.clientY - r.top) / r.height) * 2 + 1 };
+    };
+
     const handlePointerMove = (e: MouseEvent) => {
+      // Battle: input goes to the battle director only (camera stays rigid)
+      if (battleRef.current?.active) {
+        grabState = null;
+        if (hoverIndicatorRef.current) hoverIndicatorRef.current.visible = false;
+        renderer.domElement.style.cursor = battleRef.current.pointerMove(eventNdc(e));
+        return;
+      }
       // Unity-style grab pan: right button held down translates the camera
       if (grabState) {
         const dx = e.clientX - grabState.x;
@@ -3951,6 +4005,11 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     };
 
     const handlePointerDown = (e: MouseEvent) => {
+      if (battleRef.current?.active) {
+        if (e.button === 0) battleRef.current.pointerDown(eventNdc(e));
+        else if (e.button === 2) battleRef.current.cancel();
+        return;
+      }
       // Right mouse button: begin grab-pan drag (drag > 3px pans, plain click cancels)
       if (e.button === 2) {
         grabState = { x: e.clientX, y: e.clientY, moved: false };
@@ -4079,6 +4138,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
       if (intersects.length > 0) {
         const hitTile = intersects[0].object as THREE.Mesh;
+        // First movement input after a defeat re-enables battle detection
+        battleRef.current?.resumeDetection();
         handleTileClickRef.current(hitTile.userData.col, hitTile.userData.row);
       }
     };
@@ -4109,6 +4170,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         repaintGhost();
         return;
       }
+      if (battleRef.current?.active) return;
       frustumSize = Math.min(30, Math.max(6, frustumSize * (e.deltaY > 0 ? 1.08 : 1 / 1.08)));
       applyCameraFrustum();
     };
@@ -4117,6 +4179,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     // click in Placement Mode cancels the placement
     const handleContextMenu = (e: MouseEvent) => {
       e.preventDefault();
+      if (battleRef.current?.active) return;
       if (rightPanMoved) {
         rightPanMoved = false;
         return;
@@ -4127,6 +4190,14 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     // ESC while in Placement Mode: cancel. ESC also leaves any chunk edit mode.
     // Play mode: E interacts with the nearby figure
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Battle: no interaction, ESC only cancels the target selection
+      if (battleRef.current?.active) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          battleRef.current.cancel();
+        }
+        return;
+      }
       if (playModeRef.current && (e.key === 'e' || e.key === 'E') && interactTargetRef.current) {
         e.preventDefault();
         runInteractRef.current();
@@ -4227,8 +4298,20 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
           if (queue.length > 0) {
             const nextStep = queue.shift()!;
+            const prevTile = currentTileRef.current;
             currentTileRef.current = nextStep;
             setCharacterCoord(nextStep);
+            // Battle: followers step up, then initiative range check (section 2.2)
+            if (prevTile.col !== nextStep.col || prevTile.row !== nextStep.row) {
+              partyRef.current?.onLeaderArrive(nextStep, prevTile);
+              battleRef.current?.checkEncounter();
+            }
+            if (battleRef.current?.active) {
+              // battle started on this tile: the step is over, stop here
+              targetWorldPosRef.current = null;
+              moveQueueRef.current = [];
+              queue.length = 0;
+            } else
 
             if (queue.length > 0) {
               const upcoming = queue[0];
@@ -4265,16 +4348,92 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         charRoot.rotation.y = currentFacingAngleRef.current;
       }
 
-      const moving = targetWorldPosRef.current !== null || moveQueueRef.current.length > 0;
+      const moving = targetWorldPosRef.current !== null || moveQueueRef.current.length > 0 || !!battleRef.current?.leaderMoving;
       updateCharacterPoseRef.current(delta, elapsed, moving);
+
+      // Battle director (tweens, grids) and the follower chain
+      battleRef.current?.tick(delta, elapsed);
+      partyRef.current?.tick(delta, elapsed, moveSpeedRef.current, !!battleRef.current?.active);
 
       renderer.render(scene, camera);
     };
+
+    // -----------------------------------------------------------------------
+    // Battle system (play mode): marching party + battle director
+    // -----------------------------------------------------------------------
+    if (playModeRef.current) {
+      const surfaceY = () => getTileWorldPosRef.current(0, 0).y;
+      const isWalkable = (c: number, r: number) => walkableKeysRef.current.has(`${c},${r}`);
+      const party = new Party(scene, charactersRef.current, (c, r) => getTileWorldPosRef.current(c, r), isWalkable, surfaceY);
+      partyRef.current = party;
+      party.resetAround(currentTileRef.current);
+      const bridge: BattleBridge = {
+        scene,
+        camera,
+        camTarget,
+        container,
+        getFrustum: () => frustumSize,
+        setFrustum: (f: number) => { frustumSize = f; applyCameraFrustum(); },
+        tileSize: BLENDER_TILE_SIZE,
+        tileToWorld: (c, r) => getTileWorldPosRef.current(c, r),
+        isWalkable,
+        section: () => activeSectionRef.current,
+        dungeonId: () => dungeonIdOf(),
+        characters: () => charactersRef.current,
+        party: () => partyRef.current,
+        figures: () => placedNpcsRef.current,
+        figureHolder: (id: string) => placedNpcsGroup.children.find(ch => ch.userData?.npcId === id),
+        figureName: (f) => charactersRef.current.find(c => c.id === f.characterId)?.name
+          ?? npcLibraryRef.current.find(x => x.id === f.libraryId)?.fileName?.replace(/\.(glb|gltf)$/i, '')
+          ?? 'Gegner',
+        leaderRoot: () => characterRootRef.current,
+        leaderTile: () => ({ ...currentTileRef.current }),
+        leaderAnimator: () => new Animator(animationMixerRef.current, [...gltfClipsMapRef.current.values()], {
+          idle: selectedIdleClipRef.current,
+          run: selectedRunClipRef.current,
+          current: activeActionRef.current,
+          onChange: (a) => { activeActionRef.current = a; },
+        }),
+        leaderStop: () => {
+          moveQueueRef.current = [];
+          targetWorldPosRef.current = null;
+          pendingPortalTileRef.current = null;
+          setAnimState('IDLE');
+        },
+        leaderSync: (tile, facing) => {
+          moveQueueRef.current = [];
+          targetWorldPosRef.current = null;
+          currentTileRef.current = { ...tile };
+          setCharacterCoord({ ...tile });
+          const pos = getTileWorldPosRef.current(tile.col, tile.row);
+          characterPosRef.current.copy(pos);
+          targetFacingAngleRef.current = facing;
+          currentFacingAngleRef.current = facing;
+          if (characterRootRef.current) {
+            characterRootRef.current.position.copy(pos);
+            characterRootRef.current.rotation.y = facing;
+          }
+        },
+        enemyState: () => enemyStateRef.current,
+        persistEnemyState: (patch) => {
+          enemyStateRef.current = { ...enemyStateRef.current, ...patch };
+          onEnemyStateChangeRef.current?.(patch);
+        },
+        onFinished: () => {
+          setAnimState('IDLE');
+          updateInteractableRef.current();
+        },
+      };
+      attachBattle(bridge);
+    }
 
     animate();
 
     return () => {
       cancelAnimationFrame(animationFrameId);
+      detachBattle();
+      partyRef.current?.dispose();
+      partyRef.current = null;
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyDown);
       renderer.domElement.removeEventListener('pointermove', handlePointerMove);
@@ -4289,7 +4448,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       renderer.dispose();
       scene.clear();
     };
-  }, [createAnimeKnightDummy, playTactileSfx]);
+  }, [createAnimeKnightDummy, playTactileSfx, attachBattle, detachBattle]);
 
   // Drag & Drop handlers on viewport
   const handleDragOver = (e: React.DragEvent) => {
@@ -4736,7 +4895,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       )}
 
       {/* PLAY MODE: interaction HUD (E — sprechen/kämpfen) */}
-      {playMode && interactTargetLabel && (
+      {playMode && interactTargetLabel && !battleUi.active && (
         <div className="absolute bottom-7 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
           <div className="bg-gray-900/95 border border-cyan-500/50 rounded-xl px-4 py-2 shadow-2xl backdrop-blur-md flex items-center gap-3">
             <kbd className="px-2.5 py-1 bg-cyan-600 text-white text-xs font-bold rounded-lg border border-cyan-300/60 shadow">
@@ -4754,6 +4913,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         </div>
       )}
 
+      {/* BATTLE HUD (stage 1) */}
+      {playMode && <BattleOverlay ui={battleUi} api={battleApi} />}
+
       {/* BUILDER: quick settings for a clicked figure (link a scene / remove) */}
       {!playMode && selectedNpc && (
         <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-30 pointer-events-auto">
@@ -4769,6 +4931,15 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                 </div>
               </div>
             </div>
+            {selectedNpc.kind === 'enemy' && (
+              <input
+                value={selectedNpc.groupId ?? ''}
+                onChange={(e) => applyNpcGroup(selectedNpc.id, e.target.value)}
+                placeholder="Gruppe (groupId)"
+                className="px-2 py-1.5 text-xs font-semibold rounded-lg border bg-gray-800 text-gray-200 border-gray-700 w-[130px]"
+                title="Gegner mit derselben Gruppe kämpfen gemeinsam. Leer = alle Gegner im Umkreis von 4 Feldern."
+              />
+            )}
             <select
               value={selectedNpc.sceneId ?? ''}
               onChange={(e) => applyNpcScene(selectedNpc.id, e.target.value || undefined)}

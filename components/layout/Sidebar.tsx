@@ -1,5 +1,5 @@
 import React from 'react';
-import { House, BookOpen, ScrollText, Feather, Users, Compass, Castle, Swords, Archive, ChevronLeft, ChevronRight, XCircle } from 'lucide-react';
+import { House, BookOpen, ScrollText, Feather, Users, Compass, Castle, Archive, ChevronLeft, ChevronRight, XCircle } from 'lucide-react';
 import { EditorTab } from '../../types';
 import { useI18n, TKey } from '../../utils/i18n';
 
@@ -11,7 +11,6 @@ const NAV: { id: EditorTab; label: TKey; icon: React.ReactNode }[] = [
   { id: 'chars', label: 'nav.chars', icon: <Users size={20} /> },
   { id: 'maps', label: 'nav.maps', icon: <Compass size={20} /> },
   { id: 'dungeons', label: 'nav.dungeons', icon: <Castle size={20} /> },
-  { id: 'battles', label: 'nav.battles', icon: <Swords size={20} /> },
   { id: 'assets', label: 'nav.assets', icon: <Archive size={20} /> },
 ];
 

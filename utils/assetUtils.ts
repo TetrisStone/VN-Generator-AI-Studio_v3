@@ -1,4 +1,4 @@
-import { AssetItem, Scene, WorldMap, Battle, Character } from '../types';
+import { AssetItem, Scene, WorldMap, Character } from '../types';
 
 export const PRESET_ARCHETYPES = [
   { id: 'buerger', label: 'Bürger' },
@@ -20,14 +20,14 @@ export function getArchetypeLabel(val?: string): string {
 }
 
 /**
- * Checks whether an asset is currently assigned to / used by any scene, map, battle, or character.
+ * Checks whether an asset is currently assigned to / used by any scene, map or character.
  * Returns the assignment metadata if used, or undefined if unassigned.
  */
 export function getEffectiveAssignment(
   asset: AssetItem,
   scenes: Scene[] = [],
   maps: WorldMap[] = [],
-  battles: Battle[] = [],
+  _legacyBattles: unknown[] = [],
   characters: Character[] = []
 ): AssetItem['assignedTo'] | undefined {
   const fileUrl = asset.fileUrl;
@@ -61,20 +61,6 @@ export function getEffectiveAssignment(
     }
   }
 
-  // 3. Check direct usage in Battles
-  if (battles.length > 0) {
-    const matchedBattle = battles.find(
-      b => b.backgroundSrc && (b.backgroundSrc === fileUrl || b.backgroundSrc === id)
-    );
-    if (matchedBattle) {
-      return {
-        type: 'battle_bg',
-        targetId: matchedBattle.id,
-        targetName: matchedBattle.name || 'Unbenannter Kampf'
-      };
-    }
-  }
-
   // 4. Check direct usage in Characters
   if (characters.length > 0) {
     const matchedChar = characters.find(
@@ -100,8 +86,6 @@ export function getEffectiveAssignment(
       targetExists = scenes.some(s => s.id === targetId);
     } else if (type === 'map_bg' || (type as any) === 'map') {
       targetExists = maps.some(m => m.id === targetId);
-    } else if (type === 'battle_bg' || (type as any) === 'battle') {
-      targetExists = battles.some(b => b.id === targetId);
     } else if (
       type === 'character_idle' ||
       type === 'character_map' ||

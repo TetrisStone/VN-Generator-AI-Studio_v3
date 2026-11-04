@@ -327,3 +327,12 @@ select.vn-ink-input { appearance: none; padding-right: 30px; cursor: pointer; }
     linear-gradient(var(--c), var(--c)) bottom right / 2px 16px;
   background-repeat: no-repeat;
 }
+
+/* Battle system (stage 1): floating damage numbers */
+@keyframes battle-float {
+  0%   { opacity: 0; transform: translate(-50%, 6px) scale(0.7); }
+  15%  { opacity: 1; transform: translate(-50%, -6px) scale(1.15); }
+  30%  { transform: translate(-50%, -12px) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -54px) scale(1); }
+}
+.battle-floater { animation: battle-float 1.25s ease-out forwards; }

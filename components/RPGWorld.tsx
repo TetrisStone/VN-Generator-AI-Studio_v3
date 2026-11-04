@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { Character, RPGState, WorldMap, Scene, Battle, DungeonProject } from '../types';
+import { Character, RPGState, WorldMap, Scene, DungeonProject } from '../types';
 import { Save, LogOut, MapPin, Book } from 'lucide-react';
 import { loadImage } from '../utils/imageStorage';
 
@@ -12,9 +12,8 @@ interface RPGWorldProps {
   mapConfig: WorldMap; // The CURRENT map
   maps: WorldMap[]; // For referencing target map names
   scenes: Scene[]; // Needed to check dependencies
-  battles?: Battle[]; // Needed for battle data
   dungeons?: DungeonProject[]; // Phase 3: dungeon entrances
-  onInteraction: (type: 'scene'|'transition'|'character'|'battle'|'dungeon', id: string) => void;
+  onInteraction: (type: 'scene'|'transition'|'character'|'dungeon', id: string) => void;
   initialState?: RPGState;
   onSave: (state: RPGState) => void;
   onExit: () => void;
@@ -26,7 +25,6 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
   mapConfig,
   maps,
   scenes,
-  battles = [],
   dungeons = [],
   onInteraction, 
   initialState, 
@@ -119,7 +117,6 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
       if (spot.sceneId && initialState?.hiddenIds.includes(spot.sceneId)) return false;
       if (spot.targetMapId && initialState?.hiddenIds.includes(spot.targetMapId)) return false;
       if (spot.characterId && initialState?.hiddenIds.includes(spot.characterId)) return false;
-      if (spot.battleId && initialState?.hiddenIds.includes(spot.battleId)) return false;
 
       if (spot.type === 'transition') {
           const targetMapId = spot.targetMapId;
@@ -142,19 +139,6 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
           const isUnlocked = initialState?.unlockedIds.includes(scene.id);
           return !isLockedByDependency || isUnlocked;
 
-      } else if (spot.type === 'battle') {
-          const battleId = spot.battleId;
-          if (!battleId) return false;
-          const battle = battles.find(b => b.id === battleId);
-          if (!battle) return false;
-          const isCompleted = initialState?.completedBattleIds.includes(battle.id);
-          if (isCompleted && !battle.isRepeatable) return false;
-
-          // Check dependency
-          const isLockedByDependency = scenes.some(other => other.effects?.some(u => u.type === 'battle' && u.targetId === battle.id && (u.action === 'unlock' || !u.action)));
-          const isUnlocked = initialState?.unlockedIds.includes(battle.id);
-          return !isLockedByDependency || isUnlocked;
-
       } else if (spot.type === 'character') {
           return !!spot.characterId;
       } else if (spot.type === 'dungeon') {
@@ -162,7 +146,7 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
           return !!spot.dungeonId;
       }
       return true;
-  }), [mapConfig.spots, initialState?.hiddenIds, initialState?.unlockedIds, initialState?.completedSceneIds, initialState?.completedBattleIds, scenes, battles]);
+  }), [mapConfig.spots, initialState?.hiddenIds, initialState?.unlockedIds, initialState?.completedSceneIds, scenes]);
 
   // --- Interaction / Render ---
 
@@ -203,7 +187,6 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
       if (hit.type === 'scene' && hit.sceneId) onInteraction('scene', hit.sceneId);
       else if (hit.type === 'character' && hit.characterId) onInteraction('character', hit.characterId);
       else if (hit.type === 'transition' && hit.targetMapId) onInteraction('transition', hit.targetMapId);
-      else if (hit.type === 'battle' && hit.battleId) onInteraction('battle', hit.battleId);
       else if (hit.type === 'dungeon' && hit.dungeonId) onInteraction('dungeon', hit.dungeonId);
     }
   };
@@ -305,86 +288,6 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
                   
                   ctx.restore();
 
-              } else if (spot.type === 'battle') {
-                  const size = (isHovered ? 14 : 10) * baseScale; // Drastically reduced
-                  ctx.save();
-                  ctx.translate(cx, cy);
-                  ctx.fillStyle = '#991b1b'; // Red-800
-                  ctx.strokeStyle = '#f87171'; // Red-400
-                  ctx.lineWidth = 2;
-                  
-                  ctx.beginPath();
-                  ctx.roundRect(-size, -size, size*2, size*2, 4);
-                  ctx.fill();
-                  ctx.stroke();
-
-                  // Swords X
-                  ctx.strokeStyle = 'white';
-                  ctx.lineWidth = 2;
-                  ctx.beginPath();
-                  ctx.moveTo(-size/2, -size/2);
-                  ctx.lineTo(size/2, size/2);
-                  ctx.moveTo(size/2, -size/2);
-                  ctx.lineTo(-size/2, size/2);
-                  ctx.stroke();
-                  
-                  ctx.restore();
-              } else if (spot.type === 'transition') {
-                  const radius = 10 * baseScale; // Smaller
-                  const pulseColor = 'rgba(52, 211, 153, 0.6)';
-                  if (isHovered) {
-                      const time = Date.now() / 300;
-                      const pulse = Math.sin(time) * 4 + radius + 4;
-                      ctx.beginPath();
-                      ctx.arc(cx, cy, pulse, 0, Math.PI * 2);
-                      ctx.strokeStyle = pulseColor;
-                      ctx.lineWidth = 2;
-                      ctx.stroke();
-                  }
-                  ctx.beginPath();
-                  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-                  ctx.fillStyle = 'rgba(16, 185, 129, 0.9)'; 
-                  ctx.fill();
-                  ctx.strokeStyle = '#6ee7b7'; 
-                  ctx.lineWidth = 2;
-                  ctx.stroke();
-                  
-                  // Arrow
-                  ctx.beginPath();
-                  ctx.moveTo(cx - 3, cy);
-                  ctx.lineTo(cx + 3, cy);
-                  ctx.lineTo(cx + 1, cy - 3);
-                  ctx.moveTo(cx + 3, cy);
-                  ctx.lineTo(cx + 1, cy + 3);
-                  ctx.strokeStyle = 'white';
-                  ctx.stroke();
-              } else if (spot.type === 'dungeon') {
-                  // Phase 3: violet arch with a dark doorway
-                  const size = (isHovered ? 14 : 10) * baseScale;
-                  ctx.save();
-                  ctx.translate(cx, cy);
-                  ctx.shadowColor = 'black';
-                  ctx.shadowBlur = 5;
-
-                  ctx.beginPath();
-                  ctx.arc(0, 0, size, 0, Math.PI * 2);
-                  ctx.fillStyle = '#7c3aed'; // Violet-600
-                  ctx.fill();
-                  ctx.strokeStyle = '#c4b5fd';
-                  ctx.lineWidth = 2;
-                  ctx.stroke();
-
-                  // Doorway
-                  ctx.fillStyle = '#2e1065';
-                  ctx.beginPath();
-                  ctx.moveTo(-size * 0.4, size * 0.7);
-                  ctx.lineTo(-size * 0.4, 0);
-                  ctx.arc(0, 0, size * 0.4, Math.PI, 0);
-                  ctx.lineTo(size * 0.4, size * 0.7);
-                  ctx.closePath();
-                  ctx.fill();
-
-                  ctx.restore();
               }
           }
 
@@ -392,7 +295,6 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
           if (isHovered) {
             let labelName = "Unknown";
             if (spot.type === 'scene' && spot.sceneId) labelName = scenes.find(s => s.id === spot.sceneId)?.name || "Unknown Scene";
-            else if (spot.type === 'battle' && spot.battleId) labelName = battles.find(b => b.id === spot.battleId)?.name || "Battle";
             else if (spot.type === 'character' && spot.characterId) labelName = characters.find(c => c.id === spot.characterId)?.name || "Character";
             else if (spot.type === 'transition' && spot.targetMapId) labelName = `To ${maps.find(m => m.id === spot.targetMapId)?.name || 'Area'}`;
             else if (spot.type === 'dungeon' && spot.dungeonId) labelName = `Dungeon: ${dungeons.find(d => d.id === spot.dungeonId)?.name || 'Unbenannt'}`;
@@ -417,17 +319,17 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
         bgImage.onload = drawScene;
     }
     ctx.restore();
-  }, [mapConfig, characters, scenes, battles, dungeons, hoveredSpotId, spritesLoaded, visibleSpots, bgDataUrl]);
+  }, [mapConfig, characters, scenes, dungeons, hoveredSpotId, spritesLoaded, visibleSpots, bgDataUrl]);
 
   const handleManualSave = () => {
     onSave({ 
         currentMapId: mapConfig.id,
         completedSceneIds: initialState?.completedSceneIds || [],
-        completedBattleIds: initialState?.completedBattleIds || [],
         unlockedIds: initialState?.unlockedIds || [],
         hiddenIds: initialState?.hiddenIds || [],
         ongoingScenes: initialState?.ongoingScenes || {},
-        storyLog: initialState?.storyLog || []
+        storyLog: initialState?.storyLog || [],
+        dungeonEnemyState: initialState?.dungeonEnemyState || {}
     });
   };
 

@@ -1,11 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { EditorTab, ProjectMeta, Character, CharacterImportance, CharacterAlignment, Scene, WorldMap, Battle, WorldInfo, Chapter, SceneEffect, MapSpot, WorldLocation, Faction, RelationshipTrigger, RelationshipThreshold, StoryLogEntry, AssetItem, DungeonProject, DungeonSection, DungeonBaseGLB, DungeonChunkLibraryEntry, DungeonChunkPlacement, DungeonNpcLibraryEntry, DungeonNpcPlacement, DungeonChunkType, DungeonNpcKind } from '../types';
+import { EditorTab, ProjectMeta, Character, CharacterImportance, CharacterAlignment, Scene, WorldMap, WorldInfo, BattleStats, Chapter, SceneEffect, MapSpot, WorldLocation, Faction, RelationshipTrigger, RelationshipThreshold, StoryLogEntry, AssetItem, DungeonProject, DungeonSection, DungeonBaseGLB, DungeonChunkLibraryEntry, DungeonChunkPlacement, DungeonNpcLibraryEntry, DungeonNpcPlacement, DungeonChunkType, DungeonNpcKind } from '../types';
 import { Button } from './ui/Button';
 import { Sidebar } from './layout/Sidebar';
 import { HomeView, ProjectSummary } from './HomeView';
 import { SettingsView } from './SettingsView';
 import { PageHeader, EmptyState, OrnateFrame } from './ui/Ornate';
 import { useI18n } from '../utils/i18n';
+import { ABILITIES } from '../battle/abilities';
+import { DEFAULT_ENEMY_STATS, DEFAULT_HERO_STATS, DEFAULT_SPARK_STATS } from '../battle/config';
 import { Trash, Sword, Scaling, Plus, Save, Play, Download, Upload, Monitor, Map as MapIcon, Users, Target, Book, Layout, MessageSquare, Unlock, Lock, Waypoints, Image as ImageIcon, XCircle, Terminal, MapPin, Heart, EyeOff, Video, Music, Sparkles, Loader2, ArrowLeft, Cpu, Check, FolderOpen, ChevronUp, ChevronDown, ExternalLink, X, Move, ChevronLeft, ChevronRight, Search, Compass, Boxes, Castle } from 'lucide-react';
 import { CHARACTER_GROUPS, getCharacterGroupKey, getCharacterGroup, CharacterGroupKey } from '../utils/characterUtils';
 import { generateAutoScene, generateLoreTeaser } from '../services/geminiService';
@@ -729,6 +731,83 @@ const ChapterEditor: React.FC<ChapterEditorProps> = ({
     );
 };
 
+// ---------------------------------------------------------------------------
+// Battle stats (new battle system, stage 1): values from section 6, ability
+// dropdown from battle/abilities.ts and the Spark checkbox.
+// ---------------------------------------------------------------------------
+const BATTLE_PRESETS: { label: string; stats: BattleStats }[] = [
+    { label: 'Held', stats: { maxHp: DEFAULT_HERO_STATS.maxHp, atk: DEFAULT_HERO_STATS.atk, def: DEFAULT_HERO_STATS.def, ini: DEFAULT_HERO_STATS.ini } },
+    { label: 'Späher', stats: { maxHp: 80, atk: 22, def: 14, ini: 7 } },
+    { label: 'Tank', stats: { maxHp: 140, atk: 16, def: 30, ini: 3 } },
+    { label: 'Gegner', stats: { maxHp: DEFAULT_ENEMY_STATS.maxHp, atk: DEFAULT_ENEMY_STATS.atk, def: DEFAULT_ENEMY_STATS.def, ini: DEFAULT_ENEMY_STATS.ini, maxKraft: DEFAULT_ENEMY_STATS.maxKraft } },
+    { label: 'Boss', stats: { maxHp: 200, atk: 22, def: 25, ini: 4, maxKraft: 150, kraftResist: 0.5 } },
+];
+
+const BattleStatsEditor: React.FC<{ character: Character; onChange: (u: Partial<Character>) => void }> = ({ character, onChange }) => {
+    const bs = character.battleStats;
+    const isEnemy = character.alignment === 'boese';
+    const setStat = (key: keyof BattleStats, raw: string) => {
+        const base: BattleStats = bs ?? { ...BATTLE_PRESETS[isEnemy ? 3 : 0].stats };
+        const next: BattleStats = { ...base };
+        if (key === 'abilityId') {
+            next.abilityId = raw || undefined;
+        } else {
+            const v = parseFloat(raw);
+            (next as any)[key] = Number.isFinite(v) ? v : undefined;
+        }
+        onChange({ battleStats: next });
+    };
+    const field = (key: keyof BattleStats, label: string, hint: string, step = 1, placeholder?: number) => (
+        <div>
+            <label className="text-[10px] font-bold uppercase text-gray-500" title={hint}>{label}</label>
+            <input
+                type="number"
+                step={step}
+                className="w-full bg-gray-900 border border-gray-600 rounded p-1 text-center text-white"
+                placeholder={placeholder !== undefined ? String(placeholder) : ''}
+                value={(bs as any)?.[key] ?? ''}
+                onChange={e => setStat(key, e.target.value)}
+            />
+        </div>
+    );
+    const defaults = character.isSpark ? DEFAULT_SPARK_STATS : isEnemy ? DEFAULT_ENEMY_STATS : DEFAULT_HERO_STATS;
+    return (
+        <div className="bg-gray-800 p-4 rounded border border-gray-700 space-y-4">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+                <h4 className="font-bold text-emerald-400 flex items-center gap-2"><Sword size={16}/> Kampfwerte</h4>
+                <div className="flex gap-1 flex-wrap">
+                    {BATTLE_PRESETS.map(p => (
+                        <button key={p.label} className="text-[10px] px-2 py-0.5 rounded border border-gray-600 text-gray-300 hover:bg-gray-700" onClick={() => onChange({ battleStats: { ...p.stats, abilityId: bs?.abilityId } })}>{p.label}</button>
+                    ))}
+                </div>
+            </div>
+            <p className="text-[10px] text-gray-500">Leere Felder verwenden die Standardwerte (grau). Gegner erhalten ihre Werte über die Charakter-Verknüpfung der Figur im Dungeon.</p>
+            <div className="grid grid-cols-4 gap-2">
+                {field('maxHp', 'Max LP', 'Maximale Lebenspunkte', 1, defaults.maxHp)}
+                {field('atk', 'ATK', 'Angriff', 1, defaults.atk)}
+                {field('def', 'DEF', 'Verteidigung', 1, defaults.def)}
+                {field('ini', 'INI', 'Initiative = Sichtweite in Sub-Tiles', 1, defaults.ini)}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+                {field('maxKraft', 'Max Kraft (nur Gegner)', 'Fällt die Kraft auf 0, wankt der Gegner', 1, DEFAULT_ENEMY_STATS.maxKraft)}
+                {field('kraftResist', 'Kraft-Resistenz 0..1 (nur Gegner)', 'Reduziert Sparks Kraftentzug, z. B. Bosse 0.5', 0.05, 0)}
+            </div>
+            <div>
+                <label className="text-[10px] font-bold uppercase text-gray-500">Fähigkeit</label>
+                <select className="w-full bg-gray-900 border border-gray-600 rounded p-1.5 text-sm text-white" value={bs?.abilityId ?? ''} onChange={e => setStat('abilityId', e.target.value)}>
+                    <option value="">— keine —</option>
+                    {ABILITIES.map(a => <option key={a.id} value={a.id}>{a.name} ({a.apCost} AP) – {a.description}</option>)}
+                </select>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
+                <input type="checkbox" checked={!!character.isSpark} onChange={e => onChange({ isSpark: e.target.checked })} />
+                <span><b className="text-amber-300">Spark</b> – kann nicht handeln, heilt wankende Helden oder entzieht den Gegnern Kraft. Fällt Spark auf 0 LP, ist der Kampf verloren.</span>
+            </label>
+            {bs && <Button variant="danger" className="w-full text-xs" onClick={() => onChange({ battleStats: undefined })}>Werte zurücksetzen (Standardwerte)</Button>}
+        </div>
+    );
+};
+
 interface CharacterEditorProps {
   character: Character;
   assets?: AssetItem[];
@@ -768,14 +847,6 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
         fetchModels();
         return () => { isMounted = false; };
     }, [worldInfo?.comfyUrl]);
-
-    // Helper for arrays (sprites)
-    const updateSpriteArray = (arrName: 'woozySprites' | 'finishAnimation', index: number, val: string | null) => {
-        const arr = character[arrName] ? [...character[arrName]!] : [];
-        if (val) arr[index] = val;
-        else arr.splice(index, 1);
-        onChange({ [arrName]: arr });
-    };
 
     // Helper for Relationship
     const updateRelationship = (u: any) => {
@@ -1353,130 +1424,8 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                 )}
             </div>
             
-            {/* Stats Editor for Combat */}
-            <div className="bg-gray-800 p-4 rounded border border-gray-700">
-                <h4 className="font-bold text-emerald-400 mb-4 flex items-center gap-2"><Sword size={16}/> Combat Stats</h4>
-                {!character.stats ? (
-                    <Button onClick={() => onChange({ stats: { pra: 3, str: 3, wid: 3, ges: 3, wil: 3, hp: 20, maxHp: 20, limit: 10, recoveryRate: 5, weapon: { name: 'Fists', at: 3, mod: 0, dmg: 1, cap: null } } })}>Enable Combat Stats</Button>
-                ) : (
-                    <div className="space-y-4">
-                        <div className="grid grid-cols-5 gap-2 text-center">
-                           {['pra', 'str', 'wid', 'ges', 'wil'].map(stat => (
-                               <div key={stat}>
-                                   <div className="text-[10px] uppercase font-bold text-gray-500">{stat}</div>
-                                   <input type="number" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-white" value={(character.stats as any)[stat]} onChange={e => onChange({ stats: { ...character.stats!, [stat]: parseInt(e.target.value) } })} />
-                               </div>
-                           ))}
-                        </div>
-                        <div className="grid grid-cols-3 gap-4">
-                             <div>
-                                 <label className="text-xs font-bold text-gray-500">Max HP</label>
-                                 <input type="number" className="w-full bg-gray-900 border border-gray-600 rounded p-1 text-white" value={character.stats.maxHp} onChange={e => onChange({ stats: { ...character.stats!, maxHp: parseInt(e.target.value), hp: parseInt(e.target.value) } })} />
-                             </div>
-                             <div>
-                                 <label className="text-xs font-bold text-gray-500">Limit</label>
-                                 <input type="number" className="w-full bg-gray-900 border border-gray-600 rounded p-1 text-white" value={character.stats.limit} onChange={e => onChange({ stats: { ...character.stats!, limit: parseInt(e.target.value) } })} />
-                             </div>
-                             <div>
-                                 <label className="text-xs font-bold text-gray-500 text-emerald-400">Recovery</label>
-                                 <input type="number" className="w-full bg-gray-900 border border-emerald-500/50 rounded p-1 text-white" value={character.stats.recoveryRate || 5} onChange={e => onChange({ stats: { ...character.stats!, recoveryRate: parseInt(e.target.value) } })} />
-                             </div>
-                        </div>
-
-                        {/* Battle Sprites */}
-                        <div className="border-t border-gray-700 pt-4 mt-2">
-                            <label className="text-xs font-bold text-gray-500 uppercase mb-2 block">Battle Visuals (Active)</label>
-                            <div className="grid grid-cols-3 gap-2">
-                                <div className="space-y-1">
-                                    <ImageField label="Idle State" value={character.battleIdleSrc} onChange={val => onChange({ battleIdleSrc: val })} />
-                                    <div className="flex items-center gap-1">
-                                        <Scaling size={12} className="text-gray-500"/>
-                                        <input type="number" step="0.1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-xs p-1 text-white" placeholder="Scale" value={character.battleIdleScale || character.battleScale || 1} onChange={e => onChange({ battleIdleScale: parseFloat(e.target.value) })} />
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-1 mt-1">
-                                        <input type="number" step="1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-[10px] p-1 text-white" placeholder="Off X" value={character.battleIdleOffsetX || 0} onChange={e => onChange({ battleIdleOffsetX: parseInt(e.target.value) || 0 })} title="Offset X" />
-                                        <input type="number" step="1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-[10px] p-1 text-white" placeholder="Off Y" value={character.battleIdleOffsetY || 0} onChange={e => onChange({ battleIdleOffsetY: parseInt(e.target.value) || 0 })} title="Offset Y" />
-                                    </div>
-                                </div>
-                                <div className="space-y-1">
-                                    <ImageField label="Prep State" value={character.battlePrepSrc} onChange={val => onChange({ battlePrepSrc: val })} />
-                                    <div className="flex items-center gap-1">
-                                        <Scaling size={12} className="text-gray-500"/>
-                                        <input type="number" step="0.1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-xs p-1 text-white" placeholder="Scale" value={character.battlePrepScale || character.battleScale || 1} onChange={e => onChange({ battlePrepScale: parseFloat(e.target.value) })} />
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-1 mt-1">
-                                        <input type="number" step="1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-[10px] p-1 text-white" placeholder="Off X" value={character.battlePrepOffsetX || 0} onChange={e => onChange({ battlePrepOffsetX: parseInt(e.target.value) || 0 })} title="Offset X" />
-                                        <input type="number" step="1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-[10px] p-1 text-white" placeholder="Off Y" value={character.battlePrepOffsetY || 0} onChange={e => onChange({ battlePrepOffsetY: parseInt(e.target.value) || 0 })} title="Offset Y" />
-                                    </div>
-                                </div>
-                                <div className="space-y-1">
-                                    <ImageField label="Hit Impact" value={character.battleHitSrc} onChange={val => onChange({ battleHitSrc: val })} />
-                                    <div className="flex items-center gap-1">
-                                        <Scaling size={12} className="text-gray-500"/>
-                                        <input type="number" step="0.1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-xs p-1 text-white" placeholder="Scale" value={character.battleHitScale || character.battleScale || 1} onChange={e => onChange({ battleHitScale: parseFloat(e.target.value) })} />
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-1 mt-1">
-                                        <input type="number" step="1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-[10px] p-1 text-white" placeholder="Off X" value={character.battleHitOffsetX || 0} onChange={e => onChange({ battleHitOffsetX: parseInt(e.target.value) || 0 })} title="Offset X" />
-                                        <input type="number" step="1" className="w-full bg-gray-900 border border-gray-600 rounded text-center text-[10px] p-1 text-white" placeholder="Off Y" value={character.battleHitOffsetY || 0} onChange={e => onChange({ battleHitOffsetY: parseInt(e.target.value) || 0 })} title="Offset Y" />
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Woozy & Death Visuals */}
-                         <div className="border-t border-gray-700 pt-4 mt-2">
-                            <label className="text-xs font-bold text-emerald-400 uppercase mb-2 block">Woozy / Death Visuals</label>
-                            <div className="grid grid-cols-2 gap-4 mb-4">
-                                <div className="p-2 border border-emerald-500/20 rounded bg-emerald-900/10">
-                                    <div className="text-[10px] font-bold text-gray-500 uppercase mb-2">Woozy Loop (2-4 Frames)</div>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        {[0,1,2,3].map(i => (
-                                            <ImageField key={i} label={`Frame ${i+1}`} value={character.woozySprites?.[i] || null} onChange={val => updateSpriteArray('woozySprites', i, val)} />
-                                        ))}
-                                    </div>
-                                </div>
-                                <div className="p-2 border border-red-500/20 rounded bg-red-900/10">
-                                    <div className="text-[10px] font-bold text-gray-500 uppercase mb-2">Finish Sequence</div>
-                                    <div className="space-y-2">
-                                        <ImageField label="Corpse (Static)" value={character.finishSprite || null} onChange={val => onChange({ finishSprite: val })} />
-                                        <div className="grid grid-cols-2 gap-2">
-                                            {[0,1,2,3].map(i => (
-                                                <ImageField key={i} label={`Anim ${i+1}`} value={character.finishAnimation?.[i] || null} onChange={val => updateSpriteArray('finishAnimation', i, val)} />
-                                            ))}
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="border-t border-gray-700 pt-4">
-                             <div className="text-xs font-bold text-gray-500 uppercase mb-2">Weapon</div>
-                             <div className="grid grid-cols-3 gap-2">
-                                <input className="col-span-3 bg-gray-900 border border-gray-600 rounded p-1 text-sm text-white" placeholder="Weapon Name" value={character.stats.weapon.name} onChange={e => onChange({ stats: { ...character.stats!, weapon: { ...character.stats!.weapon, name: e.target.value } } })} />
-                                <input type="number" placeholder="AT" title="Attack Dice" className="bg-gray-900 border border-gray-600 rounded p-1 text-white" value={character.stats.weapon.at} onChange={e => onChange({ stats: { ...character.stats!, weapon: { ...character.stats!.weapon, at: parseInt(e.target.value) } } })} />
-                                <input type="number" placeholder="DMG" title="Damage" className="bg-gray-900 border border-gray-600 rounded p-1 text-white" value={character.stats.weapon.dmg} onChange={e => onChange({ stats: { ...character.stats!, weapon: { ...character.stats!.weapon, dmg: parseInt(e.target.value) } } })} />
-                             </div>
-                        </div>
-
-                        <div className="border-t border-gray-700 pt-4 mt-2">
-                            <label className="text-xs font-bold text-yellow-500 uppercase mb-2 block">Battle Audio (SFX)</label>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-2">
-                                    <AudioField label="Weapon Hit" value={character.sfxWeaponHit || null} onChange={val => onChange({ sfxWeaponHit: val || null })} />
-                                    <AudioField label="Weapon Miss" value={character.sfxWeaponMiss || null} onChange={val => onChange({ sfxWeaponMiss: val || null })} />
-                                </div>
-                                <div className="space-y-2">
-                                    <AudioField label="Voice Hit" value={character.sfxVoiceHit || null} onChange={val => onChange({ sfxVoiceHit: val || null })} />
-                                    <AudioField label="Voice Crit" value={character.sfxVoiceCrit || null} onChange={val => onChange({ sfxVoiceCrit: val || null })} />
-                                    <AudioField label="Voice Death" value={character.sfxVoiceDeath || null} onChange={val => onChange({ sfxVoiceDeath: val || null })} />
-                                </div>
-                            </div>
-                        </div>
-
-                        <Button variant="danger" className="w-full mt-4 text-xs" onClick={() => onChange({ stats: undefined })}>Disable Combat</Button>
-                    </div>
-                )}
-            </div>
+            {/* Battle stats (new battle system, stage 1) */}
+            <BattleStatsEditor character={character} onChange={onChange} />
         </div>
     );
 };
@@ -1484,7 +1433,6 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
 interface SceneEditorProps {
     scene: Scene;
     allScenes: Scene[];
-    allBattles: Battle[];
     allMaps: WorldMap[];
     characters: Character[];
     chapters: Chapter[];
@@ -1494,8 +1442,8 @@ interface SceneEditorProps {
     onDelete: () => void;
 }
 
-const SceneEditor: React.FC<SceneEditorProps> = ({ scene, allScenes, allBattles, allMaps, characters, chapters, worldInfo, assets, onChange, onDelete }) => {
-    const toggleEffect = (type: 'scene' | 'transition' | 'battle', targetId: string, action: 'unlock' | 'lock') => {
+const SceneEditor: React.FC<SceneEditorProps> = ({ scene, allScenes, allMaps, characters, chapters, worldInfo, assets, onChange, onDelete }) => {
+    const toggleEffect = (type: 'scene' | 'transition', targetId: string, action: 'unlock' | 'lock') => {
         const effects = scene.effects ? [...scene.effects] : [];
         const index = effects.findIndex(e => e.type === type && e.targetId === targetId);
 
@@ -1813,25 +1761,6 @@ const SceneEditor: React.FC<SceneEditorProps> = ({ scene, allScenes, allBattles,
                         })}
                     </div>
                     <div className="space-y-2">
-                        <div className="text-xs font-bold text-gray-500 uppercase sticky top-0 bg-gray-800 py-1 z-10">Battles</div>
-                        {allBattles.map((b) => {
-                            const effect = scene.effects?.find(u => u.type === 'battle' && u.targetId === b.id);
-                            const status = effect?.action || 'neutral';
-                            return (
-                                <div key={b.id} className="flex items-center justify-between bg-gray-900 p-2 rounded border border-gray-700">
-                                    <div className="flex items-center gap-2 truncate flex-1">
-                                        <Sword size={14} className="text-red-500"/>
-                                        <span className="text-xs text-gray-300 truncate" title={b.name}>{b.name}</span>
-                                    </div>
-                                    <div className="flex gap-1 ml-2">
-                                        <button onClick={() => toggleEffect('battle', b.id, 'unlock')} className={`p-1 rounded ${status === 'unlock' ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`} title="Unlock"><Unlock size={12}/></button>
-                                        <button onClick={() => toggleEffect('battle', b.id, 'lock')} className={`p-1 rounded ${status === 'lock' ? 'bg-red-600 text-white' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`} title="Lock"><Lock size={12}/></button>
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                    <div className="space-y-2">
                         <div className="text-xs font-bold text-gray-500 uppercase sticky top-0 bg-gray-800 py-1 z-10">Map Transitions</div>
                         {allMaps.map((m) => {
                             const effect = scene.effects?.find(u => u.type === 'transition' && u.targetId === m.id);
@@ -1860,7 +1789,6 @@ interface MapEditorProps {
     map: WorldMap;
     scenes: Scene[];
     characters: Character[];
-    battles: Battle[];
     allMaps: WorldMap[];
     dungeons?: DungeonProject[];
     assets?: AssetItem[];
@@ -1868,7 +1796,7 @@ interface MapEditorProps {
     onDelete: () => void;
 }
 
-const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles, allMaps, dungeons = [], assets, onChange, onDelete }) => {
+const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, allMaps, dungeons = [], assets, onChange, onDelete }) => {
     const [selectedSpotId, setSelectedSpotId] = useState<string | null>(null);
     const [draggingSpotId, setDraggingSpotId] = useState<string | null>(null);
     const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -2070,7 +1998,6 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                     >
                                         <option value="scene">Scene</option>
                                         <option value="character">Character</option>
-                                        <option value="battle">Battle</option>
                                         <option value="transition">Transition</option>
                                         <option value="dungeon">Dungeon</option>
                                     </select>
@@ -2079,12 +2006,11 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                     <label className="text-[10px] font-bold text-gray-400 uppercase">Ziel (Target)</label>
                                     <select 
                                         className="w-full bg-gray-800 border border-gray-700 rounded p-1.5 text-xs text-white focus:border-amber-500 focus:outline-none"
-                                        value={selectedSpot.sceneId || selectedSpot.characterId || selectedSpot.battleId || selectedSpot.targetMapId || selectedSpot.dungeonId || ''}
+                                        value={selectedSpot.sceneId || selectedSpot.characterId || selectedSpot.targetMapId || selectedSpot.dungeonId || ''}
                                         onChange={e => {
                                             const val = e.target.value;
                                             if (selectedSpot.type === 'scene') updateSpot(selectedSpot.id, { sceneId: val });
                                             if (selectedSpot.type === 'character') updateSpot(selectedSpot.id, { characterId: val });
-                                            if (selectedSpot.type === 'battle') updateSpot(selectedSpot.id, { battleId: val });
                                             if (selectedSpot.type === 'transition') updateSpot(selectedSpot.id, { targetMapId: val });
                                             if (selectedSpot.type === 'dungeon') updateSpot(selectedSpot.id, { dungeonId: val });
                                         }}
@@ -2092,7 +2018,6 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                         <option value="">-- Auswählen --</option>
                                         {selectedSpot.type === 'scene' && scenes.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                         {selectedSpot.type === 'character' && characters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                        {selectedSpot.type === 'battle' && battles.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                                         {selectedSpot.type === 'transition' && allMaps.filter(m => m.id !== map.id).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                         {selectedSpot.type === 'dungeon' && dungeons.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
                                     </select>
@@ -2206,8 +2131,7 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                      >
                                          <option value="scene">Scene</option>
                                          <option value="character">Character</option>
-                                         <option value="battle">Battle</option>
-                                         <option value="transition">Transition</option>
+                                          <option value="transition">Transition</option>
                                          <option value="dungeon">Dungeon</option>
                                      </select>
                                  </div>
@@ -2215,12 +2139,11 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                      <label className="text-[10px] font-bold text-gray-500 uppercase">Target</label>
                                      <select 
                                         className="w-full bg-gray-900 border border-gray-600 rounded p-1 text-xs text-white"
-                                        value={spot.sceneId || spot.characterId || spot.battleId || spot.targetMapId || spot.dungeonId || ''}
+                                        value={spot.sceneId || spot.characterId || spot.targetMapId || spot.dungeonId || ''}
                                         onChange={e => {
                                             const val = e.target.value;
                                             if (spot.type === 'scene') updateSpot(spot.id, { sceneId: val });
                                             if (spot.type === 'character') updateSpot(spot.id, { characterId: val });
-                                            if (spot.type === 'battle') updateSpot(spot.id, { battleId: val });
                                             if (spot.type === 'transition') updateSpot(spot.id, { targetMapId: val });
                                             if (spot.type === 'dungeon') updateSpot(spot.id, { dungeonId: val });
                                         }}
@@ -2228,7 +2151,6 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
                                          <option value="">-- Select --</option>
                                          {spot.type === 'scene' && scenes.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                          {spot.type === 'character' && characters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                         {spot.type === 'battle' && battles.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                                          {spot.type === 'transition' && allMaps.filter(m => m.id !== map.id).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                          {spot.type === 'dungeon' && dungeons.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
                                      </select>
@@ -2254,179 +2176,12 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, battles,
     );
 };
 
-interface BattleEditorProps {
-    battle: Battle;
-    characters: Character[];
-    chapters: Chapter[];
-    allScenes: Scene[];
-    allBattles: Battle[];
-    allMaps: WorldMap[];
-    assets?: AssetItem[];
-    onChange: (u: Partial<Battle>) => void;
-    onDelete: () => void;
-}
-
-const BattleEditor: React.FC<BattleEditorProps> = ({ battle, characters, chapters, allScenes, allBattles, allMaps, assets, onChange, onDelete }) => {
-    
-    const toggleEffect = (type: 'scene' | 'transition' | 'battle', targetId: string, action: 'unlock' | 'lock') => {
-        const effects = battle.onWinEffect ? [...battle.onWinEffect] : [];
-        const index = effects.findIndex(e => e.type === type && e.targetId === targetId);
-
-        if (index >= 0) {
-            if (effects[index].action === action) effects.splice(index, 1);
-            else effects[index] = { ...effects[index], action };
-        } else {
-            effects.push({ type, targetId, action });
-        }
-        onChange({ onWinEffect: effects });
-    };
-
-    return (
-        <div className="space-y-6 max-w-3xl vn-panel bg-gray-900/80 p-6">
-            <div className="flex justify-between items-center">
-                <h3 className="text-xl font-bold text-red-400">Editing: {battle.name}</h3>
-                <div className="flex gap-2">
-                    <label className="flex items-center gap-2 text-xs bg-gray-800 px-3 py-1 rounded border border-gray-700">
-                        <input type="checkbox" checked={battle.isRepeatable} onChange={e => onChange({ isRepeatable: e.target.checked })} />
-                        Repeatable
-                    </label>
-                    <button onClick={onDelete} className="text-red-500 hover:bg-red-900/20 p-2 rounded"><Trash size={18}/></button>
-                </div>
-            </div>
-
-             <div className="grid grid-cols-2 gap-4">
-                 <div>
-                    <label className="text-xs font-bold text-gray-500 uppercase">Battle Name</label>
-                    <input className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white" value={battle.name} onChange={e => onChange({ name: e.target.value })} />
-                 </div>
-                 <div>
-                    <label className="text-xs font-bold text-gray-500 uppercase">Chapter</label>
-                    <select className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white" value={battle.chapterId || ''} onChange={e => onChange({ chapterId: e.target.value })}>
-                        {chapters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
-                 </div>
-            </div>
-
-            <ImageField 
-                label="Battle Background" 
-                value={battle.backgroundSrc} 
-                onChange={val => onChange({ backgroundSrc: val })} 
-                assets={assets}
-                defaultPrompt={`${battle.name} battle background backdrop, epic anime combat arena, visual novel action backdrop, digital painting, dramatic cinematic lighting, masterpiece`}
-            />
-
-            <AudioField label="Background Music (Loop)" value={battle.bgmUrl || null} onChange={val => onChange({ bgmUrl: val || undefined })} />
-
-            <div className="grid grid-cols-2 gap-8">
-                {/* Player Team */}
-                <div className="bg-gray-800 p-4 rounded border border-gray-700">
-                    <h4 className="font-bold text-emerald-400 mb-2 flex items-center gap-2"><Users size={16}/> Player Team</h4>
-                    <div className="space-y-2 max-h-48 overflow-y-auto custom-scrollbar">
-                        {characters.map(c => {
-                            const group = getCharacterGroup(c);
-                            return (
-                                <label key={c.id} className="flex items-center justify-between gap-2 bg-gray-900 p-2 rounded border border-gray-700 cursor-pointer hover:bg-gray-800">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                        <input 
-                                            type="checkbox"
-                                            checked={battle.playerCharacterIds.includes(c.id)}
-                                            onChange={e => {
-                                                if (e.target.checked) onChange({ playerCharacterIds: [...battle.playerCharacterIds, c.id] });
-                                                else onChange({ playerCharacterIds: battle.playerCharacterIds.filter(id => id !== c.id) });
-                                            }}
-                                        />
-                                        <span className="text-xs text-white font-medium truncate">{c.name}</span>
-                                    </div>
-                                    <span className={`text-[9px] px-1.5 py-0.2 rounded border ${group.badgeBg} ${group.badgeBorder} ${group.textColor} font-semibold flex-shrink-0`}>
-                                        {group.shortLabel}
-                                    </span>
-                                </label>
-                            );
-                        })}
-                    </div>
-                </div>
-
-                {/* Enemy Team */}
-                <div className="bg-gray-800 p-4 rounded border border-gray-700">
-                    <h4 className="font-bold text-red-400 mb-2 flex items-center gap-2"><Target size={16}/> Enemy Team</h4>
-                    <div className="space-y-2 max-h-48 overflow-y-auto custom-scrollbar">
-                         {characters.map(c => {
-                            const group = getCharacterGroup(c);
-                            return (
-                                <label key={c.id} className="flex items-center justify-between gap-2 bg-gray-900 p-2 rounded border border-gray-700 cursor-pointer hover:bg-gray-800">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                        <input 
-                                            type="checkbox"
-                                            checked={battle.enemyCharacterIds.includes(c.id)}
-                                            onChange={e => {
-                                                if (e.target.checked) onChange({ enemyCharacterIds: [...battle.enemyCharacterIds, c.id] });
-                                                else onChange({ enemyCharacterIds: battle.enemyCharacterIds.filter(id => id !== c.id) });
-                                            }}
-                                        />
-                                        <span className="text-xs text-white font-medium truncate">{c.name}</span>
-                                    </div>
-                                    <span className={`text-[9px] px-1.5 py-0.2 rounded border ${group.badgeBg} ${group.badgeBorder} ${group.textColor} font-semibold flex-shrink-0`}>
-                                        {group.shortLabel}
-                                    </span>
-                                </label>
-                            );
-                        })}
-                    </div>
-                </div>
-            </div>
-
-            {/* Win Effects */}
-             <div className="bg-gray-800 p-4 rounded-xl border border-gray-700">
-                <label className="flex items-center gap-2 text-sm font-bold text-yellow-500 mb-4"><Unlock size={18} /> ON WIN: UNLOCKS / LOCKS</label>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-h-60 overflow-y-auto custom-scrollbar p-1">
-                    {/* Reuse similar logic from SceneEditor for unlocks */}
-                    <div className="space-y-2">
-                        <div className="text-xs font-bold text-gray-500 uppercase sticky top-0 bg-gray-800 py-1 z-10">Scenes</div>
-                        {allScenes.map((s) => {
-                            const effect = battle.onWinEffect?.find(u => u.type === 'scene' && u.targetId === s.id);
-                            const status = effect?.action || 'neutral';
-                            return (
-                                <div key={s.id} className="flex items-center justify-between bg-gray-900 p-2 rounded border border-gray-700">
-                                    <span className="text-xs text-gray-300 truncate flex-1" title={s.name}>{s.name}</span>
-                                    <div className="flex gap-1 ml-2">
-                                        <button onClick={() => toggleEffect('scene', s.id, 'unlock')} className={`p-1 rounded ${status === 'unlock' ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-500'}`}><Unlock size={12}/></button>
-                                        <button onClick={() => toggleEffect('scene', s.id, 'lock')} className={`p-1 rounded ${status === 'lock' ? 'bg-red-600 text-white' : 'bg-gray-800 text-gray-500'}`}><Lock size={12}/></button>
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                    {/* Add Maps and Battles lists similarly if needed, for now focusing on Scenes which is most common */}
-                     <div className="space-y-2">
-                        <div className="text-xs font-bold text-gray-500 uppercase sticky top-0 bg-gray-800 py-1 z-10">Map Transitions</div>
-                        {allMaps.map((m) => {
-                            const effect = battle.onWinEffect?.find(u => u.type === 'transition' && u.targetId === m.id);
-                            const status = effect?.action || 'neutral';
-                            return (
-                                <div key={m.id} className="flex items-center justify-between bg-gray-900 p-2 rounded border border-gray-700">
-                                    <span className="text-xs text-gray-300 truncate flex-1" title={m.name}>To: {m.name}</span>
-                                    <div className="flex gap-1 ml-2">
-                                        <button onClick={() => toggleEffect('transition', m.id, 'unlock')} className={`p-1 rounded ${status === 'unlock' ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-500'}`}><Unlock size={12}/></button>
-                                        <button onClick={() => toggleEffect('transition', m.id, 'lock')} className={`p-1 rounded ${status === 'lock' ? 'bg-red-600 text-white' : 'bg-gray-800 text-gray-500'}`}><Lock size={12}/></button>
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            </div>
-
-        </div>
-    );
-};
-
 interface EditorProps {
   worldInfo: WorldInfo;
   chapters: Chapter[];
   characters: Character[];
   scenes: Scene[];
   maps: WorldMap[];
-  battles: Battle[];
   dungeonProjects?: DungeonProject[];
   assets?: AssetItem[];
   storyLog?: StoryLogEntry[]; // New prop for context awareness
@@ -2435,7 +2190,6 @@ interface EditorProps {
   onUpdateCharacters: (c: Character[]) => void;
   onUpdateScenes: (s: Scene[]) => void;
   onUpdateMaps: (m: WorldMap[]) => void;
-  onUpdateBattles: (b: Battle[]) => void;
   onUpdateDungeonProjects?: (list: DungeonProject[]) => void;
   onUpdateAssets?: (a: AssetItem[]) => void;
   onPlay: () => void;
@@ -3251,7 +3005,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                          <button className="md:hidden mb-4 text-emerald-400 font-bold flex items-center gap-1.5" onClick={() => setSelectedId(null)}>
                                              <ArrowLeft size={16}/> Back to Scenes
                                          </button>
-                                         <SceneEditor key={selectedId} scene={props.scenes.find(s => s.id === selectedId)!} allScenes={props.scenes} allBattles={props.battles} allMaps={props.maps} characters={props.characters} chapters={props.chapters} worldInfo={props.worldInfo} assets={props.assets} onChange={(u) => props.onUpdateScenes(props.scenes.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateScenes(props.scenes.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
+                                         <SceneEditor key={selectedId} scene={props.scenes.find(s => s.id === selectedId)!} allScenes={props.scenes} allMaps={props.maps} characters={props.characters} chapters={props.chapters} worldInfo={props.worldInfo} assets={props.assets} onChange={(u) => props.onUpdateScenes(props.scenes.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateScenes(props.scenes.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
                                     </div>
                                 )}
                             {!selectedId && <EmptyState className="h-full hidden md:flex" icon={<Monitor size={32}/>} title={t('empty.select.title')} text={t('empty.scenes')} />}
@@ -3286,7 +3040,7 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                     <button className="md:hidden mb-4 text-emerald-400 font-bold flex items-center gap-1.5" onClick={() => setSelectedId(null)}>
                                         <ArrowLeft size={16}/> Back to Maps
                                     </button>
-                                    <MapEditor key={selectedId} map={props.maps.find(m => m.id === selectedId)!} scenes={props.scenes} characters={props.characters} battles={props.battles} allMaps={props.maps} dungeons={props.dungeonProjects} assets={props.assets} onChange={(u) => props.onUpdateMaps(props.maps.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateMaps(props.maps.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
+                                    <MapEditor key={selectedId} map={props.maps.find(m => m.id === selectedId)!} scenes={props.scenes} characters={props.characters} allMaps={props.maps} dungeons={props.dungeonProjects} assets={props.assets} onChange={(u) => props.onUpdateMaps(props.maps.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateMaps(props.maps.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
                                 </div>
                             )}
                             {!selectedId && <EmptyState className="h-full hidden md:flex" icon={<MapIcon size={32}/>} title={t('empty.select.title')} text={t('empty.maps')} />}
@@ -3395,39 +3149,6 @@ export const Editor: React.FC<EditorProps> = (props) => {
                                     </OrnateFrame>
                                 );
                             })}
-                        </div>
-                    </div>
-                )}
-                {tab === 'battles' && (
-                     <div className="flex flex-col h-full gap-5">
-<PageHeader icon={<Target size={26}/>} title={t('nav.battles')} subtitle={t('page.battles.sub')} />
-<div className="flex flex-col md:flex-row flex-1 min-h-0 gap-4 md:gap-6">
-                        <div className={`w-full ${isSubSidebarOpen ? 'md:w-1/3' : 'md:w-0 md:hidden'} border-none md:border-r border-gray-800 pb-4 md:pb-0 md:pr-4 overflow-y-auto ${selectedId ? 'hidden md:block' : 'block'}`}>
-                            <div className="flex justify-between items-center mb-3">
-                                <span className="vn-list-label flex items-center gap-2"><Target size={14}/> {t('nav.battles')} ({props.battles.length})</span>
-                                <button onClick={() => setIsSubSidebarOpen(false)} className="hidden md:flex text-gray-400 hover:text-white p-1 rounded hover:bg-gray-800 transition-colors" title="Kampf-Liste einklappen">
-                                    <ChevronLeft size={18}/>
-                                </button>
-                            </div>
-                             <Button className="w-full mb-4 py-1.5 text-sm" onClick={() => { const id = crypto.randomUUID(); props.onUpdateBattles([...props.battles, { id, name: 'New Battle', backgroundSrc: null, playerCharacterIds: [], enemyCharacterIds: [], isRepeatable: false }]); setSelectedId(id); }}><Plus size={14}/> {t('add.battle')}</Button>
-                             <div className="space-y-2">{props.battles.map(b => (<div key={b.id} onClick={() => setSelectedId(b.id)} className={`p-2 md:p-3 rounded cursor-pointer border text-sm vn-item ${selectedId === b.id ? 'vn-item--on' : ''}`}><div className="font-bold text-white">{b.name}</div></div>))}</div>
-                        </div>
-                        <div className={`flex-1 overflow-y-auto ${!selectedId ? 'hidden md:block' : 'block'}`}>
-                            {!isSubSidebarOpen && (
-                                <button onClick={() => setIsSubSidebarOpen(true)} className="hidden md:inline-flex mb-3 text-xs text-emerald-400 bg-gray-900 border border-gray-800 hover:bg-gray-800 px-2.5 py-1.5 rounded-lg items-center gap-1.5 font-medium transition-colors shadow-sm" title="Kampf-Liste ausklappen">
-                                    <ChevronRight size={16}/> Kampf-Liste anzeigen
-                                </button>
-                            )}
-                            {selectedId && props.battles.find(b => b.id === selectedId) && (
-                                <div className="flex flex-col h-full">
-                                    <button className="md:hidden mb-4 text-emerald-400 font-bold flex items-center gap-1.5" onClick={() => setSelectedId(null)}>
-                                        <ArrowLeft size={16}/> Back to Battles
-                                    </button>
-                                    <BattleEditor key={selectedId} battle={props.battles.find(b => b.id === selectedId)!} characters={props.characters} chapters={props.chapters} allScenes={props.scenes} allBattles={props.battles} allMaps={props.maps} assets={props.assets} onChange={(u) => props.onUpdateBattles(props.battles.map(x => x.id === selectedId ? { ...x, ...u } : x))} onDelete={() => { props.onUpdateBattles(props.battles.filter(x => x.id !== selectedId)); setSelectedId(null); }} />
-                                </div>
-                            )}
-                            {!selectedId && <EmptyState className="h-full hidden md:flex" icon={<Target size={32}/>} title={t('empty.select.title')} text={t('empty.battles')} />}
-                        </div>
                         </div>
                     </div>
                 )}
