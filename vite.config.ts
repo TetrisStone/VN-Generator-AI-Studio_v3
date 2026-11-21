@@ -12,6 +12,9 @@ export default defineConfig(({ mode }) => {
         allowedHosts: ['.novita.ai'],
       },
       plugins: [react()],
+      worker: {
+        format: 'es',
+      },
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)

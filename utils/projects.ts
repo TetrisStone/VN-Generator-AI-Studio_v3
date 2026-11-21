@@ -1,5 +1,5 @@
 import { getItem, setItem, getProjectItem, setProjectItem, deleteProjectItem, deleteItem } from './db';
-import { listImageIds, deleteImage } from './imageStorage';
+import { listAssetIds, deleteAsset } from './assetStore';
 
 /**
  * Multi-project storage
@@ -121,7 +121,7 @@ export const collectMediaRefs = (data: unknown, knownIds: Set<string>, into: Set
 
 /** Media ids used by the given in-memory project data */
 export const mediaRefsOf = async (data: ProjectData): Promise<Set<string>> => {
-  const known = new Set(await listImageIds());
+  const known = new Set(await listAssetIds());
   return collectMediaRefs(data, known);
 };
 
@@ -134,12 +134,13 @@ export const pruneUnusedMedia = async (candidates: Set<string>): Promise<number>
   const reg = await loadRegistry();
   const stillUsed = new Set<string>();
   for (const p of reg?.projects ?? []) {
+    if (p.coverImageId && candidates.has(p.coverImageId)) stillUsed.add(p.coverImageId);
     collectMediaRefs(await loadProjectFields(p.id), candidates, stillUsed);
     if (stillUsed.size === candidates.size) return 0;
   }
   let removed = 0;
   for (const id of candidates) {
-    if (!stillUsed.has(id)) { await deleteImage(id).catch(() => {}); removed++; }
+    if (!stillUsed.has(id)) { await deleteAsset(id).catch(() => {}); removed++; }
   }
   return removed;
 };

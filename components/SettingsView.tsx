@@ -5,6 +5,7 @@ import { getDefaultWorkflow } from '../services/comfyService';
 import { audioManager } from '../utils/audioManager';
 import { useI18n, Lang } from '../utils/i18n';
 import { OrnateFrame, FantasyButton, Panel, PageHeader } from './ui/Ornate';
+import { StorageOptimizer } from './StorageOptimizer';
 
 interface SettingsViewProps {
   worldInfo: WorldInfo;
@@ -110,6 +111,10 @@ export const SettingsView: React.FC<SettingsViewProps> = (viewProps) => {
             </div>
           </div>
         </Section>
+
+        <div className="md:col-span-2">
+          <StorageOptimizer onFlushSave={props.onQuickSave} />
+        </div>
 
             {/* LLM Settings */}
             <OrnateFrame className="bg-gray-900/80 p-6 space-y-4 md:col-span-2">

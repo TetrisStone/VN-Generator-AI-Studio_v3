@@ -1,15 +1,17 @@
 
 const DB_NAME = 'VNCreatorDB';
-const STORE_NAME = 'keyval'; // legacy store
-const IMAGES_STORE = 'images';
-const PROJECT_STORE = 'project';
+const DB_VERSION = 3;
+export const STORE_NAME = 'keyval'; // legacy & settings store
+export const IMAGES_STORE = 'images'; // legacy base64 store (kept during v3 migration)
+export const PROJECT_STORE = 'project';
+export const ASSETS_STORE = 'assets';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 export const getDB = (): Promise<IDBDatabase> => {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, 2);
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onerror = () => {
         dbPromise = null; // Reset on error
         reject(request.error);
@@ -26,10 +28,25 @@ export const getDB = (): Promise<IDBDatabase> => {
         if (!db.objectStoreNames.contains(PROJECT_STORE)) {
           db.createObjectStore(PROJECT_STORE);
         }
+        if (!db.objectStoreNames.contains(ASSETS_STORE)) {
+          db.createObjectStore(ASSETS_STORE, { keyPath: 'id' });
+        }
       };
     });
   }
   return dbPromise;
+};
+
+export const closeDB = async (): Promise<void> => {
+  if (dbPromise) {
+    try {
+      const db = await dbPromise;
+      db.close();
+    } catch {
+      // ignore close errors
+    }
+    dbPromise = null;
+  }
 };
 
 export const setItem = async (key: string, value: any): Promise<void> => {
@@ -55,7 +72,7 @@ export const getItem = async <T>(key: string): Promise<T | null> => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);
       const request = store.get(key);
-      request.onsuccess = () => resolve(request.result || null);
+      request.onsuccess = () => resolve(request.result ?? null);
       request.onerror = () => reject(request.error);
     });
   } catch (err) {
@@ -77,6 +94,22 @@ export const deleteItem = async (key: string): Promise<void> => {
   } catch (err) {
     console.error("IndexedDB Delete Error:", err);
     throw err;
+  }
+};
+
+export const getAllKeyvalKeys = async (): Promise<string[]> => {
+  try {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.getAllKeys();
+      request.onsuccess = () => resolve(request.result as string[]);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    console.error("IndexedDB keyval keys error:", err);
+    return [];
   }
 };
 
@@ -103,7 +136,7 @@ export const getProjectItem = async <T>(key: string): Promise<T | null> => {
       const tx = db.transaction(PROJECT_STORE, 'readonly');
       const store = tx.objectStore(PROJECT_STORE);
       const request = store.get(key);
-      request.onsuccess = () => resolve(request.result || null);
+      request.onsuccess = () => resolve(request.result ?? null);
       request.onerror = () => reject(request.error);
     });
   } catch (err) {
@@ -127,7 +160,6 @@ export const getAllProjectKeys = async (): Promise<string[]> => {
     return [];
   }
 };
-
 
 export const deleteProjectItem = async (key: string): Promise<void> => {
   try {

@@ -391,11 +391,11 @@ export function prepareComfyWorkflow(
   }
 }
 
-export async function generateComfyImage(
+export async function generateComfyImageBlob(
   comfyUrl: string,
   workflowJson: any,
   onStatusUpdate: (status: string) => void
-): Promise<string> {
+): Promise<Blob> {
   const normalizedUrl = comfyUrl.replace(/\/$/, "");
 
   // 1. Verbindungsprüfung & Queue-Request
@@ -472,7 +472,6 @@ export async function generateComfyImage(
 
           onStatusUpdate("Bild fertiggestellt! Lade Bilddaten...");
           
-          // 3. Bild abrufen und in Base64 umwandeln
           const viewUrl = `${normalizedUrl}/view?filename=${encodeURIComponent(imageInfo.filename)}&type=${encodeURIComponent(imageInfo.type)}` + 
             (imageInfo.subfolder ? `&subfolder=${encodeURIComponent(imageInfo.subfolder)}` : "");
           
@@ -481,19 +480,7 @@ export async function generateComfyImage(
             throw new Error("Konnte das generierte Bild nicht vom ComfyUI-Server laden.");
           }
 
-          const blob = await imgRes.blob();
-          return new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              if (reader.result) {
-                resolve(reader.result as string);
-              } else {
-                reject(new Error("Fehler beim Lesen der Bilddaten."));
-              }
-            };
-            reader.onerror = () => reject(new Error("FileReader Fehler."));
-            reader.readAsDataURL(blob);
-          });
+          return await imgRes.blob();
         }
       }
       
@@ -506,4 +493,24 @@ export async function generateComfyImage(
   }
 
   throw new Error("Zeitlimit bei der Bildgenerierung überschritten (3 Minuten).");
+}
+
+export async function generateComfyImage(
+  comfyUrl: string,
+  workflowJson: any,
+  onStatusUpdate: (status: string) => void
+): Promise<string> {
+  const blob = await generateComfyImageBlob(comfyUrl, workflowJson, onStatusUpdate);
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (reader.result) {
+        resolve(reader.result as string);
+      } else {
+        reject(new Error("Fehler beim Lesen der Bilddaten."));
+      }
+    };
+    reader.onerror = () => reject(new Error("FileReader Fehler."));
+    reader.readAsDataURL(blob);
+  });
 }

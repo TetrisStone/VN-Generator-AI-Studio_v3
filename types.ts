@@ -343,7 +343,8 @@ export interface DungeonChunkLibraryEntry {
   type: DungeonChunkType;
   fileName: string;
   fileSize: number;
-  dataBase64: string; // Data URL
+  assetId?: string;
+  dataBase64?: string; // Legacy Data URL fallback
 }
 
 /** One placed chunk copy on the 8m chunk grid (base copies excluded) */
@@ -365,7 +366,8 @@ export interface DungeonNpcLibraryEntry {
   kind: DungeonNpcKind;
   fileName: string;
   fileSize: number;
-  dataBase64: string; // Data URL
+  assetId?: string;
+  dataBase64?: string; // Legacy Data URL fallback
 }
 
 /** One placed character standing on a walkable sub-tile */
@@ -389,7 +391,8 @@ export interface DungeonNpcPlacement {
 export interface DungeonBaseGLB {
   fileName: string;
   fileSize?: number;
-  dataBase64: string;
+  assetId?: string;
+  dataBase64?: string;
   scale?: number;
   offsetX?: number;
   offsetY?: number;

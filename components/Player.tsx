@@ -6,8 +6,9 @@ import { Button } from './ui/Button';
 import { ArrowLeft, RefreshCw, Send, Save, Map, CheckCircle, Play, MapPin, Heart, SkipForward, Target, Cpu, Sparkles, XCircle, Loader2, User, Image as ImageIcon } from 'lucide-react';
 import { AsyncImage } from './ui/AsyncImage';
 import { AsyncVideo } from './ui/AsyncVideo';
-import { generateComfyImage, prepareComfyWorkflow, getAvailableLoras, getAvailableCheckpoints } from '../services/comfyService';
-import { saveImage } from '../utils/imageStorage';
+import { generateComfyImageBlob, prepareComfyWorkflow, getAvailableLoras, getAvailableCheckpoints } from '../services/comfyService';
+import { saveAsset } from '../utils/assetStore';
+import { compressImage } from '../utils/compressImage';
 
 const KEY_MOMENT_THRESHOLD = 5;
 const COMFY_STANDARD_PROMPT = "masterpiece, best quality, score_9, anime, simple_background";
@@ -392,12 +393,18 @@ export const Player: React.FC<PlayerProps> = ({ scenes, characters, chapters, wo
             comfyCheckpointFileName
         );
         
-        const base64Data = await generateComfyImage(comfyUrl, preparedWorkflow, (statusMsg) => {
+        const rawBlob = await generateComfyImageBlob(comfyUrl, preparedWorkflow, (statusMsg) => {
             setComfyStatus(statusMsg);
         });
 
+        const res = await compressImage(rawBlob, 'background');
         const newId = crypto.randomUUID();
-        await saveImage(newId, base64Data);
+        await saveAsset(newId, res.blob, {
+            kind: 'image',
+            mime: res.mime,
+            width: res.width,
+            height: res.height,
+        });
 
         setActiveEventCG(newId);
         addNotification('Event CG generiert!', 'good');

@@ -1,73 +1,73 @@
-import { getDB } from './db';
+import { IMAGES_STORE, getDB } from './db';
+import {
+  dataUrlToBlob,
+  deleteAsset,
+  getAssetUrl,
+  isDirectUrl,
+  listAssetIds,
+  saveAsset,
+} from './assetStore';
 
-const IMAGES_STORE = 'images';
-
-export const saveImage = async (id: string, base64: string): Promise<void> => {
-  try {
-    const db = await getDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(IMAGES_STORE, 'readwrite');
-      const store = tx.objectStore(IMAGES_STORE);
-      const request = store.put(base64, id);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  } catch (err) {
-    console.error("IndexedDB saveImage Error:", err);
-    throw err;
-  }
+export const saveImage = async (id: string, base64OrDataUrl: string): Promise<void> => {
+  const blob = dataUrlToBlob(base64OrDataUrl);
+  await saveAsset(id, blob);
 };
 
 export const loadImage = async (id: string): Promise<string | null> => {
   if (!id) return null;
-  // If it's still an old base64 string because it hasn't migrated but somehow passed here,
-  // or a direct link
-  if (id.startsWith('data:') || id.startsWith('http')) return id;
-  
+  if (isDirectUrl(id)) return id;
+  return getAssetUrl(id);
+};
+
+export const deleteImage = async (id: string): Promise<void> => {
+  await deleteAsset(id);
+};
+
+export const getLegacyImageKeys = async (): Promise<string[]> => {
   try {
     const db = await getDB();
-    return new Promise((resolve, reject) => {
+    if (!db.objectStoreNames.contains(IMAGES_STORE)) return [];
+    return await new Promise<string[]>((resolve, reject) => {
       const tx = db.transaction(IMAGES_STORE, 'readonly');
-      const store = tx.objectStore(IMAGES_STORE);
-      const request = store.get(id);
-      request.onsuccess = () => resolve(request.result || null);
-      request.onerror = () => reject(request.error);
+      const req = tx.objectStore(IMAGES_STORE).getAllKeys();
+      req.onsuccess = () => resolve(req.result as string[]);
+      req.onerror = () => reject(req.error);
     });
   } catch (err) {
-    console.error("IndexedDB loadImage Error:", err);
+    console.error('IndexedDB getLegacyImageKeys Error:', err);
+    return [];
+  }
+};
+
+export const getLegacyImageRaw = async (id: string): Promise<string | Blob | null> => {
+  try {
+    const db = await getDB();
+    if (!db.objectStoreNames.contains(IMAGES_STORE)) return null;
+    return await new Promise<string | Blob | null>((resolve, reject) => {
+      const tx = db.transaction(IMAGES_STORE, 'readonly');
+      const req = tx.objectStore(IMAGES_STORE).get(id);
+      req.onsuccess = () => resolve((req.result as string | Blob | undefined) ?? null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch (err) {
+    console.error('IndexedDB getLegacyImageRaw Error:', err);
     return null;
   }
 };
 
-export const deleteImage = async (id: string): Promise<void> => {
-  if (!id || id.startsWith('data:') || id.startsWith('http')) return;
-  try {
-    const db = await getDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(IMAGES_STORE, 'readwrite');
-      const store = tx.objectStore(IMAGES_STORE);
-      const request = store.delete(id);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  } catch (err) {
-    console.error("IndexedDB deleteImage Error:", err);
-    throw err;
-  }
+export const clearLegacyImagesStore = async (): Promise<void> => {
+  const db = await getDB();
+  if (!db.objectStoreNames.contains(IMAGES_STORE)) return;
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IMAGES_STORE, 'readwrite');
+    const req = tx.objectStore(IMAGES_STORE).clear();
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
 };
 
 export const listImageIds = async (): Promise<string[]> => {
-  try {
-    const db = await getDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(IMAGES_STORE, 'readonly');
-      const store = tx.objectStore(IMAGES_STORE);
-      const request = store.getAllKeys();
-      request.onsuccess = () => resolve(request.result as string[]);
-      request.onerror = () => reject(request.error);
-    });
-  } catch (err) {
-    console.error("IndexedDB listImageIds Error:", err);
-    return [];
-  }
+  const [assetIds, legacyIds] = await Promise.all([listAssetIds(), getLegacyImageKeys()]);
+  if (legacyIds.length === 0) return assetIds;
+  return Array.from(new Set([...assetIds, ...legacyIds]));
 };

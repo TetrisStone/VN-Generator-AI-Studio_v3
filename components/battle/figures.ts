@@ -2,10 +2,9 @@
 // clip lookup with fallbacks (section 13), procedural stand-in figures and the
 // follower chain that walks behind the leader on its breadcrumb trail.
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Character } from '../../types';
-import { loadImage } from '../../utils/imageStorage';
+import { createGLTFLoader, loadGlbArrayBuffer } from '../../utils/gltfLoader';
 import { resolveHeroStats, resolveSparkStats } from '../../battle/stats';
 import type { ResolvedStats } from '../../battle/types';
 import type { Tile } from '../../battle/detection';
@@ -139,22 +138,14 @@ export function buildRoster(characters: Character[]): RosterEntry[] {
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
-function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer {
-  const bin = atob(dataUrl.split(',')[1] ?? '');
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes.buffer;
-}
-
 /** Loads the GLB of a project character (model3dSrc). Null when missing/broken. */
 export async function loadCharacterGlb(c: Character | undefined): Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] } | null> {
   if (!c?.model3dSrc) return null;
   try {
-    const data = c.model3dSrc.startsWith('data:') ? c.model3dSrc : await loadImage(c.model3dSrc);
-    if (!data) return null;
-    const buffer = dataUrlToArrayBuffer(data);
+    const buffer = await loadGlbArrayBuffer(c.model3dSrc);
+    if (!buffer) return null;
     return await new Promise(resolve => {
-      new GLTFLoader().parse(buffer, '', g => resolve({ scene: g.scene, animations: g.animations || [] }), () => resolve(null));
+      createGLTFLoader().parse(buffer, '', g => resolve({ scene: g.scene, animations: g.animations || [] }), () => resolve(null));
     });
   } catch {
     return null;

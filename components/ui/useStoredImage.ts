@@ -1,14 +1,6 @@
-import { useEffect, useState } from 'react';
-import { loadImage } from '../../utils/imageStorage';
+import { useAssetUrl } from './useAssetUrl';
 
-/** Resolves an image id from the images store into a displayable data URL */
+/** Resolves an asset id from the assets store into a refcounted displayable URL */
 export const useStoredImage = (id: string | null | undefined): string | null => {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    if (!id) { setSrc(null); return; }
-    loadImage(id).then(data => { if (alive) setSrc(data); }).catch(() => { if (alive) setSrc(null); });
-    return () => { alive = false; };
-  }, [id]);
-  return src;
+  return useAssetUrl(id);
 };

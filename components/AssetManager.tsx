@@ -4,8 +4,9 @@ import { Button } from './ui/Button';
 import { PageHeader, EmptyState } from './ui/Ornate';
 import { useI18n } from '../utils/i18n';
 import { AsyncImage } from './ui/AsyncImage';
-import { saveImage, deleteImage } from '../utils/imageStorage';
-import { generateComfyImage, prepareComfyWorkflow } from '../services/comfyService';
+import { saveAsset, deleteAsset } from '../utils/assetStore';
+import { compressImage } from '../utils/compressImage';
+import { generateComfyImageBlob, prepareComfyWorkflow } from '../services/comfyService';
 import { TagSelector } from './TagSelector';
 import { getEffectiveAssignment, PRESET_ARCHETYPES, getArchetypeLabel } from '../utils/assetUtils';
 import {
@@ -258,50 +259,58 @@ export const AssetManager: React.FC<AssetManagerProps> = ({
   );
 
   // Handle Manual Upload
-  const handleUploadFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setIsUploading(true);
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      try {
-        const base64 = ev.target?.result as string;
-        const newId = crypto.randomUUID();
-        await saveImage(newId, base64);
+    try {
+      const newId = crypto.randomUUID();
+      const assetKind = file.type.startsWith('audio/') ? 'audio' : 'image';
+      const category: AssetCategory = subTab === 'all' ? 'scene_bg' : subTab;
 
-        const category: AssetCategory = subTab === 'all' ? 'scene_bg' : subTab;
-        const nameClean = file.name.replace(/\.[^/.]+$/, "");
-
-        const newAsset: AssetItem = {
-          id: newId,
-          name: nameClean || "Neues Asset",
-          category,
-          fileUrl: newId,
-          assetType: file.type.startsWith('audio/') ? 'audio' : 'image',
-          locationMeta: category !== 'characters' ? {
-            environment: 'indoor',
-            tags: []
-          } : undefined,
-          characterMeta: category === 'characters' ? {
-            alignment: 'neutral',
-            species: 'mensch',
-            gender: 'weiblich',
-            archetype: 'buerger'
-          } : undefined,
-          createdAt: Date.now()
-        };
-
-        onUpdateAssets([newAsset, ...assets]);
-      } catch (err) {
-        console.error("Upload asset failed:", err);
-        alert("Upload fehlgeschlagen.");
-      } finally {
-        setIsUploading(false);
-        if (fileInputRef.current) fileInputRef.current.value = "";
+      if (assetKind === 'image') {
+        const preset = category === 'characters' ? 'sprite' : 'background';
+        const res = await compressImage(file, preset);
+        await saveAsset(newId, res.blob, {
+          kind: 'image',
+          mime: res.mime,
+          width: res.width,
+          height: res.height,
+        });
+      } else {
+        await saveAsset(newId, file, { kind: 'audio' });
       }
-    };
-    reader.readAsDataURL(file);
+
+      const nameClean = file.name.replace(/\.[^/.]+$/, "");
+
+      const newAsset: AssetItem = {
+        id: newId,
+        name: nameClean || "Neues Asset",
+        category,
+        fileUrl: newId,
+        assetType: assetKind,
+        locationMeta: category !== 'characters' ? {
+          environment: 'indoor',
+          tags: []
+        } : undefined,
+        characterMeta: category === 'characters' ? {
+          alignment: 'neutral',
+          species: 'mensch',
+          gender: 'weiblich',
+          archetype: 'buerger'
+        } : undefined,
+        createdAt: Date.now()
+      };
+
+      onUpdateAssets([newAsset, ...assets]);
+    } catch (err) {
+      console.error("Upload asset failed:", err);
+      alert("Upload fehlgeschlagen.");
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   // Handle AI Asset Generation
@@ -321,12 +330,19 @@ export const AssetManager: React.FC<AssetManagerProps> = ({
 
       const preparedWorkflow = prepareComfyWorkflow(workflowStr, aiPrompt, width, height);
 
-      const base64Data = await generateComfyImage(comfyUrl, preparedWorkflow, (statusMsg) => {
+      const rawBlob = await generateComfyImageBlob(comfyUrl, preparedWorkflow, (statusMsg) => {
         setAiStatus(statusMsg);
       });
 
+      const preset = aiCategory === 'characters' ? 'sprite' : 'background';
+      const res = await compressImage(rawBlob, preset);
       const imageId = crypto.randomUUID();
-      await saveImage(imageId, base64Data);
+      await saveAsset(imageId, res.blob, {
+        kind: 'image',
+        mime: res.mime,
+        width: res.width,
+        height: res.height,
+      });
 
       const newAsset: AssetItem = {
         id: imageId,
@@ -367,9 +383,9 @@ export const AssetManager: React.FC<AssetManagerProps> = ({
     const asset = assetToDelete;
     if (asset.fileUrl) {
       try {
-        await deleteImage(asset.fileUrl);
+        await deleteAsset(asset.fileUrl);
       } catch (e) {
-        console.error("Fehler beim Löschen aus dem Bildspeicher:", e);
+        console.error("Fehler beim Löschen aus dem Asset-Speicher:", e);
       }
     }
     const nextAssets = assets.filter(a => a.id !== asset.id);

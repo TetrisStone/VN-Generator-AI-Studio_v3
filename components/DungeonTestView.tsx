@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { 
   ArrowLeft, RotateCcw, Upload, Compass, Shield, User, 
@@ -10,10 +9,12 @@ import {
 } from 'lucide-react';
 import { Character, Scene, DungeonProject, DungeonBaseGLB } from '../types';
 import { getItem, setItem as setKeyvalItem } from '../utils/db';
-import { loadImage } from '../utils/imageStorage';
 import { Party, Animator } from './battle/figures';
 import { useBattleScene, type BattleBridge, type EnemyStateMap } from './battle/useBattleScene';
 import { BattleOverlay } from './battle/BattleOverlay';
+import { saveAsset } from '../utils/assetStore';
+import { createGLTFLoader, loadGlbArrayBuffer } from '../utils/gltfLoader';
+import { optimizeGlbBlob, GlbOptimizationReport, formatBytes } from '../utils/optimizeGlb';
 
 interface DungeonTestViewProps {
   onExit: () => void;
@@ -53,7 +54,8 @@ const STORAGE_KEY_DOOR_GLB = 'dungeon_custom_door_glb';
 interface StoredGLBConfig {
   fileName: string;
   fileSize: number;
-  dataBase64: string;
+  assetId?: string;
+  dataBase64?: string;
   scale?: number;
   useRawScale?: boolean;
   offsetY?: number;
@@ -65,7 +67,8 @@ interface StoredGLBConfig {
 interface StoredEnvironmentGLBConfig {
   fileName: string;
   fileSize: number;
-  dataBase64: string;
+  assetId?: string;
+  dataBase64?: string;
   scale?: number;
   offsetX?: number;
   offsetY?: number;
@@ -91,7 +94,8 @@ interface ChunkLibraryEntry {
   type: ChunkType;
   fileName: string;
   fileSize: number;
-  dataBase64: string; // Data URL
+  assetId?: string;
+  dataBase64?: string; // Legacy Data URL fallback
 }
 
 // One placed copy in the chunk grid (1 chunk = 1 cell of 8m x 8m)
@@ -141,7 +145,8 @@ interface NpcLibraryEntry {
   kind: NpcKind;
   fileName: string;
   fileSize: number;
-  dataBase64: string; // Data URL
+  assetId?: string;
+  dataBase64?: string; // Legacy Data URL fallback
 }
 
 // One placed NPC/enemy copy standing on a walkable sub-tile of a section
@@ -212,29 +217,6 @@ function tileToWorld(col: number, row: number, tileSize: number = TILE_SIZE, sur
   const x = (col - 1) * tileSize;
   const z = (row - 1) * tileSize;
   return new THREE.Vector3(x, surfaceY, z);
-}
-
-// Helper: Convert ArrayBuffer to Base64 Data URL
-function arrayBufferToDataUrl(buffer: ArrayBuffer, mimeType: string = 'model/gltf-binary'): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const blob = new Blob([buffer], { type: mimeType });
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
-
-// Helper: Convert Base64 Data URL to ArrayBuffer
-function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer {
-  const base64 = dataUrl.split(',')[1];
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes.buffer;
 }
 
 // Material tuning for static environment chunks (used by base chunk & all placed copies)
@@ -709,17 +691,15 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
   // Resolve the GLB of a placed character: sandbox library entry first; when
   // the figure is bound to a project character, use its model3dSrc (Phase 2)
-  const resolveNpcSourceData = useCallback(async (libraryId: string, characterId?: string): Promise<{ dataBase64: string; fileName: string } | null> => {
+  const resolveNpcSourceData = useCallback(async (libraryId: string, characterId?: string): Promise<{ assetRef: string; fileName: string } | null> => {
     const entry = npcLibraryRef.current.find(e => e.id === libraryId);
-    if (entry) return { dataBase64: entry.dataBase64, fileName: entry.fileName };
+    const entryRef = entry?.assetId || entry?.dataBase64;
+    if (entry && entryRef) return { assetRef: entryRef, fileName: entry.fileName };
     const cid = characterId ?? (libraryId.startsWith('proj_') ? libraryId.slice('proj_'.length) : null);
     if (cid) {
       const char = charactersRef.current.find(c => c.id === cid);
       if (char?.model3dSrc) {
-        const data = char.model3dSrc.startsWith('data:')
-          ? char.model3dSrc
-          : await loadImage(char.model3dSrc);
-        if (data) return { dataBase64: data, fileName: `${char.name}.glb` };
+        return { assetRef: char.model3dSrc, fileName: `${char.name}.glb` };
       }
     }
     return null;
@@ -745,6 +725,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   const [customModelLoaded, setCustomModelLoaded] = useState<boolean>(false);
   const [customModelName, setCustomModelName] = useState<string>('');
   const [customModelSize, setCustomModelSize] = useState<number>(0);
+  const [charGlbHighRes, setCharGlbHighRes] = useState<boolean>(true);
+  const [glbReport, setGlbReport] = useState<GlbOptimizationReport | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
   const [dragHoverTarget, setDragHoverTarget] = useState<'character' | 'floor' | 'wall' | 'door' | null>(null);
   const [isLoadingModel, setIsLoadingModel] = useState<boolean>(false);
@@ -1710,13 +1692,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   // =========================================================================
 
   // Register an uploaded GLB file in the reusable chunk library
-  const addChunkLibraryEntry = useCallback(async (type: ChunkType, fileName: string, fileSize: number, dataBase64: string) => {
+  const addChunkLibraryEntry = useCallback(async (type: ChunkType, fileName: string, fileSize: number, assetId: string) => {
     const entry: ChunkLibraryEntry = {
       id: `chunk_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`,
       type,
       fileName,
       fileSize,
-      dataBase64
+      assetId
     };
     const next = [...chunkLibraryRef.current, entry];
     chunkLibraryRef.current = next;
@@ -1786,13 +1768,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   }, []);
 
   // Register an uploaded character GLB in the reusable NPC/enemy library
-  const addNpcLibraryEntry = useCallback(async (kind: NpcKind, fileName: string, fileSize: number, dataBase64: string) => {
+  const addNpcLibraryEntry = useCallback(async (kind: NpcKind, fileName: string, fileSize: number, assetId: string) => {
     const entry: NpcLibraryEntry = {
       id: makePlacementId('npc_lib'),
       kind,
       fileName,
       fileSize,
-      dataBase64
+      assetId
     };
     const next = [...npcLibraryRef.current, entry];
     npcLibraryRef.current = next;
@@ -1870,9 +1852,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
   // Enter Placement Mode: parse the library GLB and show a snapping ghost
   // Works for chunk types (8m grid) and character kinds (sub-tile grid).
-  // Phase 2: project characters pass their GLB via opts.dataBase64 and are
+  // Phase 2: project characters pass their GLB ref via opts.assetRef and are
   // remembered in the scene via opts.characterId.
-  const startPlacement = useCallback((type: PlacementType, entry: ChunkLibraryEntry | NpcLibraryEntry, opts?: { dataBase64?: string; characterId?: string }) => {
+  const startPlacement = useCallback(async (type: PlacementType, entry: ChunkLibraryEntry | NpcLibraryEntry, opts?: { assetRef?: string; characterId?: string }) => {
     setHoveredCoord(null);
     setIsLoadingModel(true);
     setLoadingMessage(type === 'npc' || type === 'enemy'
@@ -1882,14 +1864,18 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     editModeRef.current = null;
     setEditMode(null);
     handleLinkModeChangedRef.current(false);
-    const dataBase64 = opts?.dataBase64 ?? entry.dataBase64;
+    const assetRef = opts?.assetRef ?? entry.assetId ?? entry.dataBase64;
     const labelName = opts?.characterId
       ? (charactersRef.current.find(c => c.id === opts.characterId)?.name ?? entry.fileName)
       : entry.fileName;
     try {
-      const buffer = dataUrlToArrayBuffer(dataBase64);
       const requestToken = ++placementRequestSeqRef.current;
-      new GLTFLoader().parse(buffer, '', (gltf) => {
+      const buffer = await loadGlbArrayBuffer(assetRef);
+      if (!buffer) {
+        if (requestToken === placementRequestSeqRef.current) setIsLoadingModel(false);
+        return;
+      }
+      createGLTFLoader().parse(buffer, '', (gltf) => {
         // User may have cancelled while the file was still parsing
         if (requestToken !== placementRequestSeqRef.current) {
           setIsLoadingModel(false);
@@ -1974,16 +1960,20 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   // Load Character GLB File
   const processGLBFile = useCallback(async (file: File) => {
     setIsLoadingModel(true);
-    setLoadingMessage(`Lade Charakter-Modell "${file.name}"...`);
+    setLoadingMessage(`Optimiere Charakter-Modell "${file.name}"...`);
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+      const { blob, buffer, report } = await optimizeGlbBlob(file, {
+        role: 'character',
+        maxTextureSize: charGlbHighRes ? 2048 : 1024,
+        fileName: file.name
+      });
+      setLoadingMessage(`Lade Charakter-Modell "${file.name}"...`);
 
-      const loader = new GLTFLoader();
-      loader.parse(arrayBuffer, '', async (gltf) => {
+      const loader = createGLTFLoader();
+      loader.parse(buffer, '', async (gltf) => {
         mountGLBModel(gltf, {
           fileName: file.name,
-          fileSize: file.size,
+          fileSize: blob.size,
           scale: 1.0,
           useRawScale: useRawCharacterScale,
           offsetY: 0.0,
@@ -1991,16 +1981,18 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         });
 
         setCustomModelName(file.name);
-        setCustomModelSize(file.size);
+        setCustomModelSize(blob.size);
         setModelScale(1.0);
         setModelOffsetY(0.0);
         setModelRotationY(0);
 
         try {
+          const assetId = `model3d_${crypto.randomUUID()}`;
+          await saveAsset(assetId, blob, { kind: 'model', mime: 'model/gltf-binary' });
           const charConfig: DungeonBaseGLB = {
             fileName: file.name,
-            fileSize: file.size,
-            dataBase64: base64DataUrl,
+            fileSize: blob.size,
+            assetId,
             scale: 1.0,
             useRawScale: useRawCharacterScale,
             offsetY: 0.0,
@@ -2012,6 +2004,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           console.warn("Could not save GLB to IndexedDB:", storageErr);
         }
 
+        setGlbReport(report);
         setIsLoadingModel(false);
       }, (err) => {
         console.error("GLTF Loader parse error:", err);
@@ -2023,7 +2016,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       alert("Fehler beim Laden der Datei: " + err.message);
       setIsLoadingModel(false);
     }
-  }, [mountGLBModel, useRawCharacterScale]);
+  }, [mountGLBModel, useRawCharacterScale, charGlbHighRes]);
 
   // Load Floor Chunk GLB File (8m x 8m)
   // Upload a character GLB and register it in the NPC/enemy library
@@ -2031,13 +2024,20 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   const processNpcGLBFile = useCallback(async (file: File, kind: NpcKind) => {
     const kindLabel = kind === 'enemy' ? 'Gegner' : 'Neutralen-Charakter';
     setIsLoadingModel(true);
-    setLoadingMessage(`Lade ${kindLabel} "${file.name}"...`);
+    setLoadingMessage(`Optimiere ${kindLabel} "${file.name}"...`);
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+      const { blob, buffer, report } = await optimizeGlbBlob(file, {
+        role: 'character',
+        maxTextureSize: 1024,
+        fileName: file.name
+      });
+      setLoadingMessage(`Lade ${kindLabel} "${file.name}"...`);
 
-      new GLTFLoader().parse(arrayBuffer, '', async () => {
-        await addNpcLibraryEntry(kind, file.name, file.size, base64DataUrl);
+      createGLTFLoader().parse(buffer, '', async () => {
+        const assetId = `model3d_${crypto.randomUUID()}`;
+        await saveAsset(assetId, blob, { kind: 'model', mime: 'model/gltf-binary' });
+        await addNpcLibraryEntry(kind, file.name, blob.size, assetId);
+        setGlbReport(report);
         setIsLoadingModel(false);
         playTactileSfx('success');
       }, (err: any) => {
@@ -2060,44 +2060,35 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       alert(`Für "${char.name}" ist noch kein 3D-Modell im Charakter-Editor hinterlegt.`);
       return;
     }
-    setIsLoadingModel(true);
-    setLoadingMessage(`Lade 3D-Modell für ${char.name}...`);
-    try {
-      const dataUrl = char.model3dSrc.startsWith('data:')
-        ? char.model3dSrc
-        : await loadImage(char.model3dSrc);
-      if (!dataUrl) {
-        alert('3D-Modell im Speicher nicht gefunden.');
-        setIsLoadingModel(false);
-        return;
-      }
-      const pseudoEntry: NpcLibraryEntry = {
-        id: `proj_${char.id}`,
-        kind,
-        fileName: `${char.name}.glb`,
-        fileSize: 0,
-        dataBase64: dataUrl
-      };
-      startPlacement(kind, pseudoEntry, { dataBase64: dataUrl, characterId: char.id });
-    } catch (err) {
-      console.error('Failed to load project character GLB:', err);
-      setIsLoadingModel(false);
-    }
+    const pseudoEntry: NpcLibraryEntry = {
+      id: `proj_${char.id}`,
+      kind,
+      fileName: `${char.name}.glb`,
+      fileSize: 0,
+      ...(char.model3dSrc.startsWith('data:')
+        ? { dataBase64: char.model3dSrc }
+        : { assetId: char.model3dSrc })
+    };
+    await startPlacement(kind, pseudoEntry, { assetRef: char.model3dSrc, characterId: char.id });
   }, [startPlacement]);
 
   // Load Floor GLB File
   const processFloorGLBFile = useCallback(async (file: File) => {
     setIsLoadingModel(true);
-    setLoadingMessage(`Lade Bodenplatte "${file.name}" (8x8m)...`);
+    setLoadingMessage(`Optimiere Bodenplatte "${file.name}" (8x8m)...`);
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+      const { blob, buffer, report } = await optimizeGlbBlob(file, {
+        role: 'chunk',
+        maxTextureSize: 1024,
+        fileName: file.name
+      });
+      setLoadingMessage(`Lade Bodenplatte "${file.name}" (8x8m)...`);
 
-      const loader = new GLTFLoader();
-      loader.parse(arrayBuffer, '', async (gltf) => {
+      const loader = createGLTFLoader();
+      loader.parse(buffer, '', async (gltf) => {
         mountFloorGLB(gltf, {
           fileName: file.name,
-          fileSize: file.size,
+          fileSize: blob.size,
           scale: 1.0,
           offsetX: 0.0,
           offsetY: 0.0,
@@ -2106,19 +2097,22 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         });
 
         setCustomFloorName(file.name);
-        setCustomFloorSize(file.size);
+        setCustomFloorSize(blob.size);
         setFloorScale(1.0);
         setFloorOffsetX(0.0);
         setFloorOffsetY(0.0);
         setFloorOffsetZ(0.0);
         setFloorRotationY(0);
 
-        // Register in chunk library (file can be re-selected for additional grid copies)
-        addChunkLibraryEntry('floor', file.name, file.size, base64DataUrl);        try {
+        try {
+          const assetId = `model3d_${crypto.randomUUID()}`;
+          await saveAsset(assetId, blob, { kind: 'model', mime: 'model/gltf-binary' });
+          // Share the same assetId between chunkLibrary and baseFloor (no duplicate storage)
+          await addChunkLibraryEntry('floor', file.name, blob.size, assetId);
           const floorConfig: DungeonBaseGLB = {
             fileName: file.name,
-            fileSize: file.size,
-            dataBase64: base64DataUrl,
+            fileSize: blob.size,
+            assetId,
             scale: 1.0,
             offsetX: 0.0,
             offsetY: 0.0,
@@ -2131,6 +2125,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           console.warn("Could not save Floor GLB to IndexedDB:", storageErr);
         }
 
+        setGlbReport(report);
         setIsLoadingModel(false);
       }, (err) => {
         console.error("Floor GLTF parse error:", err);
@@ -2147,16 +2142,20 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   // Load Wall GLB File (8m length, 4m height)
   const processWallGLBFile = useCallback(async (file: File) => {
     setIsLoadingModel(true);
-    setLoadingMessage(`Lade Wand "${file.name}" (8m)...`);
+    setLoadingMessage(`Optimiere Wand "${file.name}" (8m)...`);
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+      const { blob, buffer, report } = await optimizeGlbBlob(file, {
+        role: 'chunk',
+        maxTextureSize: 1024,
+        fileName: file.name
+      });
+      setLoadingMessage(`Lade Wand "${file.name}" (8m)...`);
 
-      const loader = new GLTFLoader();
-      loader.parse(arrayBuffer, '', async (gltf) => {
+      const loader = createGLTFLoader();
+      loader.parse(buffer, '', async (gltf) => {
         mountWallGLB(gltf, {
           fileName: file.name,
-          fileSize: file.size,
+          fileSize: blob.size,
           scale: 1.0,
           offsetX: 0.0,
           offsetY: 0.0,
@@ -2167,19 +2166,22 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         });
 
         setCustomWallName(file.name);
-        setCustomWallSize(file.size);
+        setCustomWallSize(blob.size);
         setWallScale(1.0);
         setWallOffsetX(0.0);
         setWallOffsetY(0.0);
         setWallOffsetZ(0.0);
         setWallRotationY(0);
 
-        // Register in chunk library (file can be re-selected for additional grid copies)
-        addChunkLibraryEntry('wall', file.name, file.size, base64DataUrl);        try {
+        try {
+          const assetId = `model3d_${crypto.randomUUID()}`;
+          await saveAsset(assetId, blob, { kind: 'model', mime: 'model/gltf-binary' });
+          // Share the same assetId between chunkLibrary and baseWall (no duplicate storage)
+          await addChunkLibraryEntry('wall', file.name, blob.size, assetId);
           const wallConfig: DungeonBaseGLB = {
             fileName: file.name,
-            fileSize: file.size,
-            dataBase64: base64DataUrl,
+            fileSize: blob.size,
+            assetId,
             scale: 1.0,
             offsetX: 0.0,
             offsetY: 0.0,
@@ -2194,6 +2196,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           console.warn("Could not save Wall GLB to IndexedDB:", storageErr);
         }
 
+        setGlbReport(report);
         setIsLoadingModel(false);
       }, (err) => {
         console.error("Wall GLTF parse error:", err);
@@ -2210,16 +2213,20 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   // Load Door GLB File (center of left wall at 0°, center of upper wall at -90°)
   const processDoorGLBFile = useCallback(async (file: File) => {
     setIsLoadingModel(true);
-    setLoadingMessage(`Lade Tür-Modell "${file.name}"...`);
+    setLoadingMessage(`Optimiere Tür-Modell "${file.name}"...`);
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const base64DataUrl = await arrayBufferToDataUrl(arrayBuffer);
+      const { blob, buffer, report } = await optimizeGlbBlob(file, {
+        role: 'chunk',
+        maxTextureSize: 1024,
+        fileName: file.name
+      });
+      setLoadingMessage(`Lade Tür-Modell "${file.name}"...`);
 
-      const loader = new GLTFLoader();
-      loader.parse(arrayBuffer, '', async (gltf) => {
+      const loader = createGLTFLoader();
+      loader.parse(buffer, '', async (gltf) => {
         mountDoorGLB(gltf, {
           fileName: file.name,
-          fileSize: file.size,
+          fileSize: blob.size,
           scale: 1.0,
           offsetX: 0.0,
           offsetY: 0.0,
@@ -2230,19 +2237,22 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         });
 
         setCustomDoorName(file.name);
-        setCustomDoorSize(file.size);
+        setCustomDoorSize(blob.size);
         setDoorScale(1.0);
         setDoorOffsetX(0.0);
         setDoorOffsetY(0.0);
         setDoorOffsetZ(0.0);
         setDoorRotationY(0);
 
-        // Register in chunk library (file can be re-selected for additional grid copies)
-        addChunkLibraryEntry('door', file.name, file.size, base64DataUrl);        try {
+        try {
+          const assetId = `model3d_${crypto.randomUUID()}`;
+          await saveAsset(assetId, blob, { kind: 'model', mime: 'model/gltf-binary' });
+          // Share the same assetId between chunkLibrary and baseDoor (no duplicate storage)
+          await addChunkLibraryEntry('door', file.name, blob.size, assetId);
           const doorConfig: DungeonBaseGLB = {
             fileName: file.name,
-            fileSize: file.size,
-            dataBase64: base64DataUrl,
+            fileSize: blob.size,
+            assetId,
             scale: 1.0,
             offsetX: 0.0,
             offsetY: 0.0,
@@ -2257,6 +2267,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           console.warn("Could not save Door GLB to IndexedDB:", storageErr);
         }
 
+        setGlbReport(report);
         setIsLoadingModel(false);
       }, (err) => {
         console.error("Door GLTF parse error:", err);
@@ -2279,14 +2290,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     setIsLoadingModel(true);
     setLoadingMessage(`Lade 3D-Modell für ${char.name}...`);
     try {
-      const dataUrl = await loadImage(char.model3dSrc);
-      if (!dataUrl) {
+      const buffer = await loadGlbArrayBuffer(char.model3dSrc);
+      if (!buffer) {
         alert("3D-Modell im Speicher nicht gefunden.");
         setIsLoadingModel(false);
         return;
       }
-      const buffer = dataUrlToArrayBuffer(dataUrl);
-      const loader = new GLTFLoader();
+      const loader = createGLTFLoader();
       loader.parse(buffer, '', (gltf) => {
         mountGLBModel(gltf, {
           fileName: `${char.name}.glb`,
@@ -2299,12 +2309,17 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         setCustomModelSize(0);
         setBaseData('char', {
           fileName: `${char.name}.glb`,
-          dataBase64: dataUrl,
+          ...(char.model3dSrc!.startsWith('data:')
+            ? { dataBase64: char.model3dSrc! }
+            : { assetId: char.model3dSrc! }),
           scale: char.model3dScale ?? 1.0,
           useRawScale: useRawCharacterScale,
           offsetY: char.model3dOffsetY ?? 0.0,
           rotationY: char.model3dRotationY ?? 0.0
         });
+        setIsLoadingModel(false);
+      }, (err) => {
+        console.error("Failed to parse character GLB:", err);
         setIsLoadingModel(false);
       });
     } catch (err: any) {
@@ -2926,20 +2941,23 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const initCharacter = async () => {
       try {
         const storedGLB = await loadDungeonData<StoredGLBConfig>(STORAGE_KEY_CHAR_GLB, 'baseCharacter');
-        if (storedGLB?.dataBase64) {
-          const buffer = dataUrlToArrayBuffer(storedGLB.dataBase64);
-          const loader = new GLTFLoader();
-          loader.parse(buffer, '', (gltf) => {
-            setCustomModelName(storedGLB.fileName || 'custom_model.glb');
-            setCustomModelSize(storedGLB.fileSize || 0);
-            if (storedGLB.scale !== undefined) setModelScale(storedGLB.scale);
-            if (storedGLB.useRawScale !== undefined) setUseRawCharacterScale(storedGLB.useRawScale);
-            if (storedGLB.offsetY !== undefined) setModelOffsetY(storedGLB.offsetY);
-            if (storedGLB.rotationY !== undefined) setModelRotationY(storedGLB.rotationY);
+        const charRef = storedGLB?.assetId || storedGLB?.dataBase64;
+        if (storedGLB && charRef) {
+          const buffer = await loadGlbArrayBuffer(charRef);
+          if (buffer) {
+            const loader = createGLTFLoader();
+            loader.parse(buffer, '', (gltf) => {
+              setCustomModelName(storedGLB.fileName || 'custom_model.glb');
+              setCustomModelSize(storedGLB.fileSize || 0);
+              if (storedGLB.scale !== undefined) setModelScale(storedGLB.scale);
+              if (storedGLB.useRawScale !== undefined) setUseRawCharacterScale(storedGLB.useRawScale);
+              if (storedGLB.offsetY !== undefined) setModelOffsetY(storedGLB.offsetY);
+              if (storedGLB.rotationY !== undefined) setModelRotationY(storedGLB.rotationY);
 
-            mountGLBModelRef.current(gltf, storedGLB);
-          });
-          return;
+              mountGLBModelRef.current(gltf, storedGLB);
+            });
+            return;
+          }
         }
       } catch (err) {
         console.warn("Failed to restore stored GLB:", err);
@@ -2958,18 +2976,21 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       // 1. Restore Custom Floor (8m x 8m)
       try {
         const storedFloor = await loadDungeonData<StoredEnvironmentGLBConfig>(STORAGE_KEY_FLOOR_GLB, 'baseFloor');
-        if (storedFloor?.dataBase64) {
-          const buffer = dataUrlToArrayBuffer(storedFloor.dataBase64);
-          new GLTFLoader().parse(buffer, '', (gltf) => {
-            setCustomFloorName(storedFloor.fileName || 'custom_floor.glb');
-            setCustomFloorSize(storedFloor.fileSize || 0);
-            if (storedFloor.offsetX !== undefined) setFloorOffsetX(storedFloor.offsetX);
-            if (storedFloor.offsetY !== undefined) setFloorOffsetY(storedFloor.offsetY);
-            if (storedFloor.offsetZ !== undefined) setFloorOffsetZ(storedFloor.offsetZ);
-            if (storedFloor.rotationY !== undefined) setFloorRotationY(storedFloor.rotationY);
-            if (storedFloor.scale !== undefined) setFloorScale(storedFloor.scale);
-            mountFloorGLBRef.current(gltf, storedFloor);
-          });
+        const floorRef = storedFloor?.assetId || storedFloor?.dataBase64;
+        if (storedFloor && floorRef) {
+          const buffer = await loadGlbArrayBuffer(floorRef);
+          if (buffer) {
+            createGLTFLoader().parse(buffer, '', (gltf) => {
+              setCustomFloorName(storedFloor.fileName || 'custom_floor.glb');
+              setCustomFloorSize(storedFloor.fileSize || 0);
+              if (storedFloor.offsetX !== undefined) setFloorOffsetX(storedFloor.offsetX);
+              if (storedFloor.offsetY !== undefined) setFloorOffsetY(storedFloor.offsetY);
+              if (storedFloor.offsetZ !== undefined) setFloorOffsetZ(storedFloor.offsetZ);
+              if (storedFloor.rotationY !== undefined) setFloorRotationY(storedFloor.rotationY);
+              if (storedFloor.scale !== undefined) setFloorScale(storedFloor.scale);
+              mountFloorGLBRef.current(gltf, storedFloor);
+            });
+          }
         }
       } catch (err) {
         console.warn("Failed to restore custom floor:", err);
@@ -2978,20 +2999,23 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       // 2. Restore Custom Wall (8m, North & East)
       try {
         const storedWall = await loadDungeonData<StoredEnvironmentGLBConfig>(STORAGE_KEY_WALL_GLB, 'baseWall');
-        if (storedWall?.dataBase64) {
-          const buffer = dataUrlToArrayBuffer(storedWall.dataBase64);
-          new GLTFLoader().parse(buffer, '', (gltf) => {
-            setCustomWallName(storedWall.fileName || 'custom_wall.glb');
-            setCustomWallSize(storedWall.fileSize || 0);
-            if (storedWall.offsetX !== undefined) setWallOffsetX(storedWall.offsetX);
-            if (storedWall.offsetY !== undefined) setWallOffsetY(storedWall.offsetY);
-            if (storedWall.offsetZ !== undefined) setWallOffsetZ(storedWall.offsetZ);
-            if (storedWall.rotationY !== undefined) setWallRotationY(storedWall.rotationY);
-            if (storedWall.scale !== undefined) setWallScale(storedWall.scale);
-            if (storedWall.showLeftWall !== undefined) setShowLeftWall(storedWall.showLeftWall);
-            if (storedWall.showUpperWall !== undefined) setShowUpperWall(storedWall.showUpperWall);
-            mountWallGLBRef.current(gltf, storedWall);
-          });
+        const wallRef = storedWall?.assetId || storedWall?.dataBase64;
+        if (storedWall && wallRef) {
+          const buffer = await loadGlbArrayBuffer(wallRef);
+          if (buffer) {
+            createGLTFLoader().parse(buffer, '', (gltf) => {
+              setCustomWallName(storedWall.fileName || 'custom_wall.glb');
+              setCustomWallSize(storedWall.fileSize || 0);
+              if (storedWall.offsetX !== undefined) setWallOffsetX(storedWall.offsetX);
+              if (storedWall.offsetY !== undefined) setWallOffsetY(storedWall.offsetY);
+              if (storedWall.offsetZ !== undefined) setWallOffsetZ(storedWall.offsetZ);
+              if (storedWall.rotationY !== undefined) setWallRotationY(storedWall.rotationY);
+              if (storedWall.scale !== undefined) setWallScale(storedWall.scale);
+              if (storedWall.showLeftWall !== undefined) setShowLeftWall(storedWall.showLeftWall);
+              if (storedWall.showUpperWall !== undefined) setShowUpperWall(storedWall.showUpperWall);
+              mountWallGLBRef.current(gltf, storedWall);
+            });
+          }
         }
       } catch (err) {
         console.warn("Failed to restore custom wall:", err);
@@ -3000,20 +3024,23 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       // 3. Restore Custom Door (center of left wall, upper wall)
       try {
         const storedDoor = await loadDungeonData<StoredEnvironmentGLBConfig>(STORAGE_KEY_DOOR_GLB, 'baseDoor');
-        if (storedDoor?.dataBase64) {
-          const buffer = dataUrlToArrayBuffer(storedDoor.dataBase64);
-          new GLTFLoader().parse(buffer, '', (gltf) => {
-            setCustomDoorName(storedDoor.fileName || 'custom_door.glb');
-            setCustomDoorSize(storedDoor.fileSize || 0);
-            if (storedDoor.offsetX !== undefined) setDoorOffsetX(storedDoor.offsetX);
-            if (storedDoor.offsetY !== undefined) setDoorOffsetY(storedDoor.offsetY);
-            if (storedDoor.offsetZ !== undefined) setDoorOffsetZ(storedDoor.offsetZ);
-            if (storedDoor.rotationY !== undefined) setDoorRotationY(storedDoor.rotationY);
-            if (storedDoor.scale !== undefined) setDoorScale(storedDoor.scale);
-            if (storedDoor.showLeftDoor !== undefined) setShowLeftDoor(storedDoor.showLeftDoor);
-            if (storedDoor.showUpperDoor !== undefined) setShowUpperDoor(storedDoor.showUpperDoor);
-            mountDoorGLBRef.current(gltf, storedDoor);
-          });
+        const doorRef = storedDoor?.assetId || storedDoor?.dataBase64;
+        if (storedDoor && doorRef) {
+          const buffer = await loadGlbArrayBuffer(doorRef);
+          if (buffer) {
+            createGLTFLoader().parse(buffer, '', (gltf) => {
+              setCustomDoorName(storedDoor.fileName || 'custom_door.glb');
+              setCustomDoorSize(storedDoor.fileSize || 0);
+              if (storedDoor.offsetX !== undefined) setDoorOffsetX(storedDoor.offsetX);
+              if (storedDoor.offsetY !== undefined) setDoorOffsetY(storedDoor.offsetY);
+              if (storedDoor.offsetZ !== undefined) setDoorOffsetZ(storedDoor.offsetZ);
+              if (storedDoor.rotationY !== undefined) setDoorRotationY(storedDoor.rotationY);
+              if (storedDoor.scale !== undefined) setDoorScale(storedDoor.scale);
+              if (storedDoor.showLeftDoor !== undefined) setShowLeftDoor(storedDoor.showLeftDoor);
+              if (storedDoor.showUpperDoor !== undefined) setShowUpperDoor(storedDoor.showUpperDoor);
+              mountDoorGLBRef.current(gltf, storedDoor);
+            });
+          }
         }
       } catch (err) {
         console.warn("Failed to restore custom door:", err);
@@ -3045,10 +3072,12 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         if (Array.isArray(storedPlaced) && storedPlaced.length > 0) {
           for (const inst of storedPlaced) {
             const entry = storedLibrary?.find(e => e.id === inst.libraryId);
-            if (!entry) continue;
-            const buffer = dataUrlToArrayBuffer(entry.dataBase64);
+            const entryRef = entry?.assetId || entry?.dataBase64;
+            if (!entry || !entryRef) continue;
+            const buffer = await loadGlbArrayBuffer(entryRef);
+            if (!buffer) continue;
             await new Promise<void>((resolve) => {
-              new GLTFLoader().parse(buffer, '', (gltf) => {
+              createGLTFLoader().parse(buffer, '', (gltf) => {
                 placeChunkInstance(inst, gltf.scene);
                 resolve();
               }, () => resolve());
@@ -3079,9 +3108,10 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
             // to that character's model3dSrc (Phase 2)
             const source = await resolveNpcSourceData(inst.libraryId, inst.characterId);
             if (!source) continue;
-            const buffer = dataUrlToArrayBuffer(source.dataBase64);
+            const buffer = await loadGlbArrayBuffer(source.assetRef);
+            if (!buffer) continue;
             await new Promise<void>((resolve) => {
-              new GLTFLoader().parse(buffer, '', (gltf) => {
+              createGLTFLoader().parse(buffer, '', (gltf) => {
                 mountNpcInstance(inst, { scene: gltf.scene, animations: gltf.animations || [] });
                 resolve();
               }, () => resolve());
@@ -3487,15 +3517,20 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
     // Pick a placed chunk up: it follows the cursor as ghost until the next
     // click commits the new position. ESC / Right click restores the original.
-    const startMoveSession = (inst: PlacedChunkInstance) => {
+    const startMoveSession = async (inst: PlacedChunkInstance) => {
       const entry = chunkLibraryRef.current.find(el => el.id === inst.libraryId);
-      if (!entry) return;
+      const entryRef = entry?.assetId || entry?.dataBase64;
+      if (!entry || !entryRef) return;
       setIsLoadingModel(true);
       setLoadingMessage(`Chunk wird aufgenommen: "${entry.fileName}"...`);
       try {
         const requestToken = ++placementRequestSeqRef.current;
-        const buffer = dataUrlToArrayBuffer(entry.dataBase64);
-        new GLTFLoader().parse(buffer, '', (gltf) => {
+        const buffer = await loadGlbArrayBuffer(entryRef);
+        if (!buffer) {
+          if (requestToken === placementRequestSeqRef.current) setIsLoadingModel(false);
+          return;
+        }
+        createGLTFLoader().parse(buffer, '', (gltf) => {
           // The user switched to something else while the file was parsing
           if (requestToken !== placementRequestSeqRef.current) {
             setIsLoadingModel(false);
@@ -3544,8 +3579,12 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       setLoadingMessage(`Figur wird aufgenommen: "${source.fileName}"...`);
       try {
         const requestToken = ++placementRequestSeqRef.current;
-        const buffer = dataUrlToArrayBuffer(source.dataBase64);
-        new GLTFLoader().parse(buffer, '', (gltf) => {
+        const buffer = await loadGlbArrayBuffer(source.assetRef);
+        if (!buffer) {
+          if (requestToken === placementRequestSeqRef.current) setIsLoadingModel(false);
+          return;
+        }
+        createGLTFLoader().parse(buffer, '', (gltf) => {
           // The user switched to something else while the file was parsing
           if (requestToken !== placementRequestSeqRef.current) {
             setIsLoadingModel(false);
@@ -4758,6 +4797,55 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         </div>
       </div>
 
+      {/* GLB OPTIMIZATION REPORT FLOATER */}
+      {glbReport && (
+        <div className="absolute top-16 right-4 z-40 max-w-sm w-[calc(100%-2rem)] bg-gray-900/95 backdrop-blur-md border border-cyan-500/60 rounded-2xl p-3.5 shadow-2xl text-xs space-y-2 pointer-events-auto">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-bold text-cyan-300 truncate">
+              GLB-Bericht: {glbReport.fileName || 'Modell.glb'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setGlbReport(null)}
+              className="text-gray-400 hover:text-white"
+              title="Bericht schließen"
+            >
+              <X size={14} />
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-[11px] text-gray-300">
+            <div>
+              <span className="text-gray-500 block">Größe</span>
+              <span className="font-mono">
+                {formatBytes(glbReport.originalBytes)} → <strong className="text-emerald-400">{formatBytes(glbReport.optimizedBytes)}</strong>
+                {glbReport.originalBytes > 0 && glbReport.optimizedBytes < glbReport.originalBytes && (
+                  <span className="text-emerald-400 block">
+                    (-{Math.round((1 - glbReport.optimizedBytes / glbReport.originalBytes) * 100)}%)
+                  </span>
+                )}
+              </span>
+            </div>
+            <div>
+              <span className="text-gray-500 block">Dreiecke</span>
+              <span className="font-mono">{glbReport.triangles.toLocaleString('de-DE')}</span>
+            </div>
+            <div>
+              <span className="text-gray-500 block">Max. Textur</span>
+              <span className="font-mono">
+                {glbReport.maxTextureResolution > 0 ? `${glbReport.maxTextureResolution} px` : 'Keine'}
+              </span>
+            </div>
+          </div>
+          {glbReport.warnings.length > 0 && (
+            <div className="bg-amber-950/70 border border-amber-700/60 text-amber-200 rounded-lg p-2 text-[11px] space-y-0.5">
+              {glbReport.warnings.map((w, idx) => (
+                <div key={idx}>⚠ {w}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* TILE HOVER FLOATER */}
       {hoveredCoord && !placementMode && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 pointer-events-none z-10 transition-all duration-150">
@@ -5096,13 +5184,27 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
               {/* Quick Action in Tab Header */}
               <div className="flex items-center gap-2">
                 {activeTab === 'character' && (
-                  <button
-                    onClick={() => charFileInputRef.current?.click()}
-                    className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white border border-cyan-400/40 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors shadow"
-                  >
-                    <Upload size={13} />
-                    <span>{customModelLoaded ? 'Anderen Charakter wählen' : 'Charakter GLB laden'}</span>
-                  </button>
+                  <>
+                    <label
+                      className="flex items-center gap-1.5 text-[11px] text-gray-300 bg-gray-800/80 border border-gray-700 px-2.5 py-1.5 rounded-xl cursor-pointer select-none"
+                      title="Texturen bis 2048 px behalten (Hauptfigur), sonst 1024 px"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={charGlbHighRes}
+                        onChange={(e) => setCharGlbHighRes(e.target.checked)}
+                        className="rounded bg-gray-900 border-gray-600 text-cyan-500"
+                      />
+                      <span>2048 px (Hauptfigur)</span>
+                    </label>
+                    <button
+                      onClick={() => charFileInputRef.current?.click()}
+                      className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white border border-cyan-400/40 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors shadow"
+                    >
+                      <Upload size={13} />
+                      <span>{customModelLoaded ? 'Anderen Charakter wählen' : 'Charakter GLB laden'}</span>
+                    </button>
+                  </>
                 )}
 
                 {activeTab === 'floor' && (

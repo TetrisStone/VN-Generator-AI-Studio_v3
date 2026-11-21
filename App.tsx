@@ -11,7 +11,19 @@ import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { audioManager } from './utils/audioManager';
 import { Character, Scene, GameSaveData, RPGState, WorldMap, ChatMessage, WorldInfo, Chapter, StoryLogEntry, AssetItem, DungeonProject } from './types';
 import { getItem, setItem } from './utils/db';
-import { loadImage, saveImage, listImageIds } from './utils/imageStorage';
+import {
+  dataUrlToBlob,
+  detectAssetKind,
+  extensionToMime,
+  getAssetBlob,
+  getAssetRecord,
+  getAssetUrl,
+  initStoragePersistence,
+  listAssetIds,
+  mimeToExtension,
+  releaseAssetUrl,
+  saveAsset,
+} from './utils/assetStore';
 import {
   LEGACY_PROJECT_ID, ProjectData, ProjectRegistry, saveGameKey, loadRegistry, saveRegistry, createEntry,
   loadProjectFields, saveProjectFields, deleteProjectFields, hasProjectData, collectMediaRefs, mediaRefsOf, pruneUnusedMedia
@@ -20,8 +32,9 @@ import { Dialog } from './components/ui/Dialog';
 import { useI18n, translate } from './utils/i18n';
 import JSZip from 'jszip';
 import { generateSceneSummary } from './services/geminiService';
-import { Loader2 } from 'lucide-react';
+import { Loader2, AlertTriangle, X } from 'lucide-react';
 import { extractImagesFromProject } from './utils/migrateImages';
+import { runAssetMigrationV1, MigrationProgress } from './utils/migrateAssets';
 
 // Default Data for quick start
 const DEFAULT_CHAPTERS: Chapter[] = [
@@ -61,37 +74,6 @@ const DEFAULT_WORLD: WorldInfo = {
 };
 
 const PROJECT_STORAGE_KEY = 'vn_creator_project';
-
-function uint8ArrayToBase64DataURLAsync(arr: Uint8Array, mimeType: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const blob = new Blob([arr], { type: mimeType });
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
-
-function dataURLToUint8Array(dataUrl: string): { array: Uint8Array; mimeType: string } | null {
-  if (!dataUrl || typeof dataUrl !== 'string') return null;
-  const arr = dataUrl.split(',');
-  if (arr.length < 2) return null;
-  const mimeMatch = arr[0].match(/:(.*?);/);
-  if (!mimeMatch) return null;
-  const mimeType = mimeMatch[1];
-  try {
-    const bstr = atob(arr[1]);
-    let n = bstr.length;
-    const u8arr = new Uint8Array(n);
-    while (n--) {
-      u8arr[n] = bstr.charCodeAt(n);
-    }
-    return { array: u8arr, mimeType };
-  } catch (err) {
-    console.error("Failed to decode base64 in dataURLToUint8Array:", err);
-    return null;
-  }
-}
 
 // Fields of the removed 2D dice battle system. Old projects still load; these
 // values are dropped (no conversion into the new BattleStats, section 6).
@@ -163,6 +145,8 @@ const App: React.FC = () => {
   const [showJournal, setShowJournal] = useState(false);
   const [generatingSummary, setGeneratingSummary] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState<MigrationProgress | null>(null);
+  const [lowStorageWarning, setLowStorageWarning] = useState<string | null>(null);
 
   // Background Music State
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -372,7 +356,7 @@ const App: React.FC = () => {
     transition(async () => {
       const id = activeIdRef.current;
       const reg = registryRef.current!;
-      const known = new Set(await listImageIds());
+      const known = new Set(await listAssetIds());
       const refs = collectMediaRefs(stateRef.current, known);
       const idx = reg.projects.findIndex(p => p.id === id);
       await deleteProjectFields(id);
@@ -402,6 +386,26 @@ const App: React.FC = () => {
     if (initStartedRef.current) return;
     initStartedRef.current = true;
     const initLoad = async () => {
+        initStoragePersistence().then(status => {
+            if (status.lowSpace) {
+                const freePct = Math.round(status.freeRatio * 100);
+                setLowStorageWarning(
+                    `Wenig Speicherplatz im Browser verfügbar (${freePct} % frei). Bitte exportiere deine Projekte regelmäßig oder optimiere Medien.`
+                );
+            }
+        }).catch(() => {});
+
+        try {
+            await runAssetMigrationV1((progress) => setMigrationProgress(progress));
+        } catch (e) {
+            console.error("Asset migration V1 failed:", e);
+            setLowStorageWarning(
+                "Asset-Migration wurde wegen eines Fehlers unterbrochen. Bestehende Daten blieben erhalten und werden beim nächsten Start erneut migriert."
+            );
+        } finally {
+            setMigrationProgress(null);
+        }
+
         let reg = await loadRegistry();
         let id: string;
         let data: ProjectData = {};
@@ -426,13 +430,12 @@ const App: React.FC = () => {
             }
         }
 
-        // Media extraction migration (old projects embedded base64 data)
+        // Fallback extraction for very old localStorage projects not yet extracted into IndexedDB
         const migrated = await getItem('mediaExtracted');
         if (!migrated) {
             if (hasProjectData(data)) {
                 setIsProcessing(true);
                 try {
-                    await setItem(`project_backup_${Date.now()}`, data);
                     data = await extractImagesFromProject(data);
                     await saveProjectFields(id, data);
                 } catch (e) {
@@ -505,44 +508,24 @@ const App: React.FC = () => {
       const ownMedia = await mediaRefsOf(data);
       
       const zip = new JSZip();
-      zip.file("project.json", JSON.stringify(data, null, 2));
+      zip.file("project.json", JSON.stringify(data, null, 2), { compression: 'DEFLATE' });
 
       if (includeMedia) {
-        // Include all media in binary form to save memory and avoid RangeError
-        const imagesFolder = zip.folder("images");
-        const videosFolder = zip.folder("videos");
-        const audioFolder = zip.folder("audio");
-
-        if (imagesFolder && videosFolder && audioFolder) {
-          const imageIds = Array.from(ownMedia);
-          
-          for (const id of imageIds) {
-            const base64 = await loadImage(id);
-            if (base64) {
-              const binaryData = dataURLToUint8Array(base64);
-              if (binaryData) {
-                const { array, mimeType } = binaryData;
-                // Encode MIME type in filename to decode on import
-                const safeMime = mimeType.replace('/', '_');
-                const filename = `${id}___${safeMime}.bin`;
-
-                if (base64.startsWith('data:video/')) {
-                   videosFolder.file(filename, array);
-                } else if (base64.startsWith('data:audio/')) {
-                   audioFolder.file(filename, array);
-                } else {
-                   imagesFolder.file(filename, array);
-                }
-              } else {
-                // If it's not a data URL, fallback to saving it as a text file
-                if (base64.startsWith('data:video/')) {
-                   videosFolder.file(`${id}.txt`, base64);
-                } else if (base64.startsWith('data:audio/')) {
-                   audioFolder.file(`${id}.txt`, base64);
-                } else {
-                   imagesFolder.file(`${id}.txt`, base64);
-                }
-              }
+        const assetsFolder = zip.folder("assets");
+        if (assetsFolder) {
+          const assetIds = Array.from(ownMedia);
+          for (const id of assetIds) {
+            const rec = await getAssetRecord(id);
+            if (rec?.blob) {
+              const ext = mimeToExtension(rec.mime, rec.kind);
+              assetsFolder.file(`${id}.${ext}`, rec.blob, { compression: 'STORE' });
+              continue;
+            }
+            const fallbackBlob = await getAssetBlob(id);
+            if (fallbackBlob) {
+              const mime = fallbackBlob.type || 'application/octet-stream';
+              const ext = mimeToExtension(mime, detectAssetKind(mime));
+              assetsFolder.file(`${id}.${ext}`, fallbackBlob, { compression: 'STORE' });
             }
           }
         }
@@ -621,77 +604,73 @@ const App: React.FC = () => {
         const content = await projectFile.async("text");
         data = JSON.parse(content);
 
-        // Extract media files reliably from any path in zip
-        const mediaPromises: Promise<void>[] = [];
-        let mediaCount = 0;
-
+        // Collect media entries and import them directly as Blobs in bounded batches
+        const mediaEntries: Array<{ filename: string; zipObj: JSZip.JSZipObject }> = [];
         for (const zipPath of Object.keys(unzipped.files)) {
           const zipObj = unzipped.files[zipPath];
           if (zipObj.dir) continue;
-          
-          // Strip any parent directory paths to get pure filename
           const filename = zipPath.split('/').pop();
           if (!filename || filename === 'project.json') continue;
-
-          if (filename.endsWith('.txt')) {
-            // Legacy base64 text file
-            const id = filename.replace('.txt', '');
-            mediaPromises.push(
-              zipObj.async("text").then(async base64 => {
-                if (base64 && base64.trim().length > 0) {
-                  await saveImage(id, base64.trim());
-                  mediaCount++;
-                }
-              }).catch(err => console.error("Error importing text file:", filename, err))
-            );
-          } else if (filename.includes('___') && filename.endsWith('.bin')) {
-            // New binary file: id___safeMime.bin
-            const baseName = filename.substring(0, filename.length - 4); // strip .bin
-            const parts = baseName.split('___');
-            if (parts.length >= 2) {
-              const id = parts[0];
-              const mimeType = parts[1].replace('_', '/');
-              mediaPromises.push(
-                zipObj.async("uint8array").then(async arr => {
-                  if (arr && arr.length > 0) {
-                    const base64 = await uint8ArrayToBase64DataURLAsync(arr, mimeType);
-                    await saveImage(id, base64);
-                    mediaCount++;
-                  }
-                }).catch(err => console.error("Error importing binary media file:", filename, err))
-              );
-            }
-          } else {
-            // Standard media extensions (e.g. uuid.png, uuid.jpg, etc.)
-            const extMatch = filename.match(/\.(png|jpg|jpeg|webp|gif|mp4|webm|mp3|wav|ogg)$/i);
-            if (extMatch) {
-              const ext = extMatch[1].toLowerCase();
-              const id = filename.substring(0, filename.lastIndexOf('.'));
-              let mimeType = 'image/png';
-              if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
-              else if (ext === 'webp') mimeType = 'image/webp';
-              else if (ext === 'gif') mimeType = 'image/gif';
-              else if (ext === 'mp4') mimeType = 'video/mp4';
-              else if (ext === 'webm') mimeType = 'video/webm';
-              else if (ext === 'mp3') mimeType = 'audio/mp3';
-              else if (ext === 'wav') mimeType = 'audio/wav';
-              else if (ext === 'ogg') mimeType = 'audio/ogg';
-
-              mediaPromises.push(
-                zipObj.async("uint8array").then(async arr => {
-                  if (arr && arr.length > 0) {
-                    const base64 = await uint8ArrayToBase64DataURLAsync(arr, mimeType);
-                    await saveImage(id, base64);
-                    mediaCount++;
-                  }
-                }).catch(err => console.error("Error importing standard media file:", filename, err))
-              );
-            }
-          }
+          mediaEntries.push({ filename, zipObj });
         }
 
-        await Promise.all(mediaPromises);
-        console.log(`Successfully imported ${mediaCount} media files into IndexedDB.`);
+        const IMPORT_BATCH_SIZE = 12;
+        let mediaCount = 0;
+
+        for (let i = 0; i < mediaEntries.length; i += IMPORT_BATCH_SIZE) {
+          const batch = mediaEntries.slice(i, i + IMPORT_BATCH_SIZE);
+          await Promise.all(
+            batch.map(async ({ filename, zipObj }) => {
+              try {
+                if (filename.endsWith('.txt')) {
+                  const id = filename.slice(0, -4);
+                  const text = (await zipObj.async("text")).trim();
+                  if (text.length > 0) {
+                    const blob = text.startsWith('data:')
+                      ? dataUrlToBlob(text)
+                      : new Blob([text], { type: 'text/plain' });
+                    await saveAsset(id, blob);
+                    mediaCount++;
+                  }
+                } else if (filename.includes('___') && filename.endsWith('.bin')) {
+                  const baseName = filename.slice(0, -4);
+                  const sepIdx = baseName.indexOf('___');
+                  if (sepIdx > 0) {
+                    const id = baseName.slice(0, sepIdx);
+                    const mimeType = baseName.slice(sepIdx + 3).replace('_', '/');
+                    const rawBlob = await zipObj.async("blob");
+                    if (rawBlob && rawBlob.size > 0) {
+                      await saveAsset(id, new Blob([rawBlob], { type: mimeType }), {
+                        mime: mimeType,
+                        kind: detectAssetKind(mimeType),
+                      });
+                      mediaCount++;
+                    }
+                  }
+                } else {
+                  const extMatch = filename.match(/\.(webp|png|jpg|jpeg|gif|svg|avif|glb|gltf|mp3|wav|ogg|m4a|flac|mp4|webm|mov)$/i);
+                  if (extMatch) {
+                    const ext = extMatch[1].toLowerCase();
+                    const id = filename.slice(0, filename.lastIndexOf('.'));
+                    const mimeType = extensionToMime(ext);
+                    const rawBlob = await zipObj.async("blob");
+                    if (rawBlob && rawBlob.size > 0) {
+                      await saveAsset(id, new Blob([rawBlob], { type: mimeType }), {
+                        mime: mimeType,
+                        kind: detectAssetKind(mimeType),
+                      });
+                      mediaCount++;
+                    }
+                  }
+                }
+              } catch (err) {
+                console.error("Error importing media file:", filename, err);
+              }
+            })
+          );
+        }
+
+        console.log(`Successfully imported ${mediaCount} media files into IndexedDB assets store.`);
       } else {
         // Fallback for legacy JSON imports
         const content = await new Promise<string>((resolve, reject) => {
@@ -721,7 +700,7 @@ const App: React.FC = () => {
 
       if (mode === 'replace') {
         const id = activeIdRef.current;
-        const known = new Set(await listImageIds());
+        const known = new Set(await listAssetIds());
         const oldRefs = collectMediaRefs(stateRef.current, known);
         // A file without project details keeps the details of the open project
         if (!norm.worldInfo.projectMeta) norm.worldInfo.projectMeta = stateRef.current.worldInfo.projectMeta;
@@ -1042,11 +1021,20 @@ const App: React.FC = () => {
 
   useEffect(() => {
       let isMounted = true;
+      let acquired: { id: string; url: string } | null = null;
       if (!audioRef.current) return;
       console.log('Audio useEffect triggered, currentBgmUrl:', currentBgmUrl);
       if (currentBgmUrl) {
-          loadImage(currentBgmUrl).then(resolvedUrl => {
-              if (isMounted && audioRef.current) {
+          const targetId = currentBgmUrl;
+          getAssetUrl(targetId).then(resolvedUrl => {
+              if (!isMounted) {
+                  if (resolvedUrl) releaseAssetUrl(targetId, resolvedUrl);
+                  return;
+              }
+              if (resolvedUrl) {
+                  acquired = { id: targetId, url: resolvedUrl };
+              }
+              if (audioRef.current) {
                   if (currentResolvedBgm.current !== resolvedUrl) {
                       console.log('Setting audio src to resolved URL and playing');
                       currentResolvedBgm.current = resolvedUrl;
@@ -1056,20 +1044,64 @@ const App: React.FC = () => {
                       console.log('Audio URL resolved to identical source, skipping restart.');
                   }
               }
-          });
+          }).catch(console.error);
       } else {
           console.log('Pausing audio and clearing src');
           currentResolvedBgm.current = null;
           audioRef.current.pause();
           audioRef.current.src = '';
       }
-      return () => { isMounted = false; };
+      return () => {
+          isMounted = false;
+          if (acquired) {
+              releaseAssetUrl(acquired.id, acquired.url);
+              acquired = null;
+          }
+      };
   }, [currentBgmUrl]);
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 font-sans selection:bg-emerald-500 selection:text-white">
       {/* BACKGROUND AUDIO PLAYER */}
       <audio ref={audioRef} loop className="hidden" />
+
+      {/* LOW STORAGE WARNING BANNER */}
+      {lowStorageWarning && (
+          <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[250] max-w-xl w-[calc(100%-2rem)] bg-amber-950/95 border border-amber-500/70 text-amber-100 px-4 py-3 rounded-xl shadow-2xl flex items-start gap-3">
+              <AlertTriangle size={20} className="text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-xs leading-relaxed flex-1">{lowStorageWarning}</p>
+              <button
+                  type="button"
+                  onClick={() => setLowStorageWarning(null)}
+                  className="text-amber-300 hover:text-white shrink-0"
+                  title="Hinweis schließen"
+              >
+                  <X size={16} />
+              </button>
+          </div>
+      )}
+
+      {/* ASSET MIGRATION OVERLAY */}
+      {migrationProgress && (
+          <div className="fixed inset-0 z-[220] bg-black/90 flex flex-col items-center justify-center px-6">
+              <Loader2 size={48} className="animate-spin text-emerald-500 mb-4" />
+              <h2 className="text-xl font-bold text-white tracking-widest mb-2">ASSET-MIGRATION</h2>
+              <p className="text-sm text-gray-300 mb-4 text-center">{migrationProgress.message}</p>
+              <div className="w-full max-w-md bg-gray-800 rounded-full h-2.5 overflow-hidden border border-gray-700">
+                  <div
+                      className="bg-emerald-500 h-full transition-all duration-150"
+                      style={{
+                          width: `${migrationProgress.total > 0 ? Math.min(100, Math.round((migrationProgress.done / migrationProgress.total) * 100)) : 100}%`,
+                      }}
+                  />
+              </div>
+              {migrationProgress.total > 0 && (
+                  <p className="text-xs text-gray-400 mt-2 font-mono">
+                      {migrationProgress.done} / {migrationProgress.total}
+                  </p>
+              )}
+          </div>
+      )}
 
       {/* PROCESSING OVERLAY */}
       {isProcessing && (

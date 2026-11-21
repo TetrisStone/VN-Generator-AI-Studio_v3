@@ -16,7 +16,10 @@ import { AsyncVideo } from './ui/AsyncVideo';
 import { AssetManager } from './AssetManager';
 import { AssetSelectorModal } from './AssetSelectorModal';
 
-import { saveImage, loadImage, deleteImage } from '../utils/imageStorage';
+import { saveAsset } from '../utils/assetStore';
+import { compressImage, ImagePreset } from '../utils/compressImage';
+import { optimizeGlbBlob, GlbOptimizationReport, formatBytes } from '../utils/optimizeGlb';
+import { useAssetUrl } from './ui/useAssetUrl';
 import { getItem } from '../utils/db';
 
 // Keys of the raw 3D dungeon sandbox (DungeonTestView) in the keyval store
@@ -31,7 +34,7 @@ const DUNGEON_SANDBOX_KEYS = {
   baseDoor: 'dungeon_custom_door_glb',
   baseCharacter: 'dungeon_custom_glb_config'
 } as const;
-import { generateComfyImage, prepareComfyWorkflow, getDefaultWorkflow, getAvailableLoras, getAvailableCheckpoints } from '../services/comfyService';
+import { generateComfyImageBlob, prepareComfyWorkflow, getDefaultWorkflow, getAvailableLoras, getAvailableCheckpoints } from '../services/comfyService';
 
 export const WorldInfoContext = React.createContext<WorldInfo | null>(null);
 
@@ -41,11 +44,12 @@ interface ImageFieldProps {
   onChange: (val: string | null) => void;
   defaultPrompt?: string;
   assets?: AssetItem[];
+  imagePreset?: ImagePreset;
 }
 
-const ImageField: React.FC<ImageFieldProps> = ({ label, value, onChange, defaultPrompt = '', assets }) => {
+const ImageField: React.FC<ImageFieldProps> = ({ label, value, onChange, defaultPrompt = '', assets, imagePreset = 'sprite' }) => {
     const inputRef = useRef<HTMLInputElement>(null);
-    const [imgSrc, setImgSrc] = useState<string | null>(null);
+    const imgSrc = useAssetUrl(value);
     const [isLoading, setIsLoading] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
 
@@ -59,45 +63,24 @@ const ImageField: React.FC<ImageFieldProps> = ({ label, value, onChange, default
 
     const worldInfo = React.useContext(WorldInfoContext);
 
-    React.useEffect(() => {
-        let isMounted = true;
-        const fetchImage = async () => {
-            if (value) {
-                setIsLoading(true);
-                try {
-                    const data = await loadImage(value);
-                    if (isMounted) setImgSrc(data);
-                } catch (e) {
-                    console.error('Failed to load image', e);
-                } finally {
-                    if (isMounted) setIsLoading(false);
-                }
-            } else {
-                setImgSrc(null);
-            }
-        };
-        fetchImage();
-        return () => { isMounted = false; };
-    }, [value]);
-
-    const processFile = (file: File) => {
+    const processFile = async (file: File) => {
         setIsLoading(true);
-        const reader = new FileReader();
-        reader.onload = async (ev) => {
-            try {
-                const base64 = ev.target?.result as string;
-                let newId = value || crypto.randomUUID();
-                await saveImage(newId, base64);
-                setImgSrc(base64); // show immediately
-                onChange(newId);
-                if (inputRef.current) inputRef.current.value = "";
-            } catch (e) {
-                console.error('Failed to save image', e);
-            } finally {
-                setIsLoading(false);
-            }
-        };
-        reader.readAsDataURL(file);
+        try {
+            const compressed = await compressImage(file, imagePreset);
+            const newId = crypto.randomUUID();
+            await saveAsset(newId, compressed.blob, {
+                kind: 'image',
+                mime: compressed.mime,
+                width: compressed.width,
+                height: compressed.height,
+            });
+            onChange(newId);
+            if (inputRef.current) inputRef.current.value = "";
+        } catch (e) {
+            console.error('Failed to save image', e);
+        } finally {
+            setIsLoading(false);
+        }
     };
 
     const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -128,7 +111,6 @@ const ImageField: React.FC<ImageFieldProps> = ({ label, value, onChange, default
 
     const handleRemove = async () => {
         onChange(null);
-        setImgSrc(null);
     };
 
     const handleOpenAiModal = (e: React.MouseEvent) => {
@@ -148,19 +130,24 @@ const ImageField: React.FC<ImageFieldProps> = ({ label, value, onChange, default
             const comfyUrl = worldInfo?.comfyUrl || 'http://127.0.0.1:8188';
             const workflowStr = worldInfo?.comfyWorkflow || '';
 
-            const isBackground = label.toLowerCase().includes('background') || label.toLowerCase().includes('hintergrund') || label.toLowerCase().includes('bg');
+            const isBackground = imagePreset === 'background';
             const width = isBackground ? 1024 : 512;
             const height = isBackground ? 576 : 512;
 
             const preparedWorkflow = prepareComfyWorkflow(workflowStr, aiPrompt, width, height);
             
-            const base64Data = await generateComfyImage(comfyUrl, preparedWorkflow, (statusMsg) => {
+            const rawBlob = await generateComfyImageBlob(comfyUrl, preparedWorkflow, (statusMsg) => {
                 setAiStatus(statusMsg);
             });
 
+            const compressed = await compressImage(rawBlob, imagePreset);
             const newId = crypto.randomUUID();
-            await saveImage(newId, base64Data);
-            setImgSrc(base64Data);
+            await saveAsset(newId, compressed.blob, {
+                kind: 'image',
+                mime: compressed.mime,
+                width: compressed.width,
+                height: compressed.height,
+            });
             onChange(newId);
             setShowAiModal(false);
         } catch (err: any) {
@@ -325,7 +312,7 @@ const ImageField: React.FC<ImageFieldProps> = ({ label, value, onChange, default
                                 <div className="flex justify-between">
                                     <span>Zielauflösung:</span>
                                     <span>
-                                        {label.toLowerCase().includes('background') || label.toLowerCase().includes('hintergrund') || label.toLowerCase().includes('bg') ? '1024x576 (16:9)' : '512x512 (1:1)'}
+                                        {imagePreset === 'background' ? '1024x576 (16:9)' : '512x512 (1:1)'}
                                     </span>
                                 </div>
                             </div>
@@ -388,7 +375,7 @@ interface VideoFieldProps {
 const VideoField: React.FC<VideoFieldProps> = ({ label, value, onChange }) => {
     const inputRef = useRef<HTMLInputElement>(null);
 
-    const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
             // Limit video size roughly to prevent crashes (optional, purely UX)
@@ -396,12 +383,15 @@ const VideoField: React.FC<VideoFieldProps> = ({ label, value, onChange }) => {
                 alert("Video file is too large (Max ~50MB recommended for browser storage)");
                 return;
             }
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                onChange(ev.target?.result as string);
+            try {
+                const newId = crypto.randomUUID();
+                await saveAsset(newId, file, { kind: 'video', mime: file.type || 'video/mp4' });
+                onChange(newId);
+            } catch (err) {
+                console.error('Failed to save video asset', err);
+            } finally {
                 if (inputRef.current) inputRef.current.value = "";
-            };
-            reader.readAsDataURL(file);
+            }
         }
     };
 
@@ -453,19 +443,22 @@ interface AudioFieldProps {
 const AudioField: React.FC<AudioFieldProps> = ({ label, value, onChange }) => {
     const inputRef = useRef<HTMLInputElement>(null);
 
-    const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
             if (file.size > 20 * 1024 * 1024) {
                 alert("Audio file is too large (Max ~20MB recommended for browser storage)");
                 return;
             }
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                onChange(ev.target?.result as string);
+            try {
+                const newId = crypto.randomUUID();
+                await saveAsset(newId, file, { kind: 'audio', mime: file.type || 'audio/mpeg' });
+                onChange(newId);
+            } catch (err) {
+                console.error('Failed to save audio asset', err);
+            } finally {
                 if (inputRef.current) inputRef.current.value = "";
-            };
-            reader.readAsDataURL(file);
+            }
         }
     };
 
@@ -824,6 +817,16 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
     const [checkpoints, setCheckpoints] = useState<string[]>([]);
     const [isLoadingModels, setIsLoadingModels] = useState<boolean>(false);
 
+    // 3D GLB Optimization State
+    const [glbHighResTextures, setGlbHighResTextures] = useState<boolean>(character.importance !== 'side');
+    const [isOptimizingGlb, setIsOptimizingGlb] = useState<boolean>(false);
+    const [glbReport, setGlbReport] = useState<GlbOptimizationReport | null>(null);
+
+    useEffect(() => {
+        setGlbHighResTextures(character.importance !== 'side');
+        setGlbReport(null);
+    }, [character.id]);
+
     useEffect(() => {
         let isMounted = true;
         const fetchModels = async () => {
@@ -1091,6 +1094,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                     value={character.imageSrc} 
                     onChange={val => onChange({ imageSrc: val })} 
                     assets={assets}
+                    imagePreset="sprite"
                     defaultPrompt={`${character.name}, standard portrait, ${character.defaultDescription || ''}, anime visual novel style, high quality, standalone character sprite, white background`}
                 />
                 <ImageField 
@@ -1098,67 +1102,133 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                     value={character.mapSpriteSrc} 
                     onChange={val => onChange({ mapSpriteSrc: val })} 
                     assets={assets}
+                    imagePreset="icon"
                     defaultPrompt={`${character.name}, mini chibi sprite, ${character.defaultDescription || ''}, transparent background, 2d game sprite, high quality`}
                 />
             </div>
 
             {/* 3D GLB Model for Dungeon Exploration */}
-            <div className="bg-gray-800/90 p-4 rounded-xl border border-gray-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
-                <div className="flex items-center gap-3 min-w-0">
-                    <Compass size={22} className="text-cyan-400 flex-shrink-0" />
-                    <div className="min-w-0">
-                        <div className="text-sm font-bold text-white flex items-center gap-2">
-                            <span>3D-Modell (.glb) für Dungeon</span>
-                            {character.model3dSrc && (
-                                <span className="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-700/60 px-2 py-0.5 rounded font-mono font-semibold">
-                                    GLB Aktiv
-                                </span>
-                            )}
+            <div className="bg-gray-800/90 p-4 rounded-xl border border-gray-700/80 space-y-3 shadow-md">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <Compass size={22} className="text-cyan-400 flex-shrink-0" />
+                        <div className="min-w-0">
+                            <div className="text-sm font-bold text-white flex items-center gap-2">
+                                <span>3D-Modell (.glb) für Dungeon</span>
+                                {character.model3dSrc && (
+                                    <span className="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-700/60 px-2 py-0.5 rounded font-mono font-semibold">
+                                        GLB Aktiv
+                                    </span>
+                                )}
+                            </div>
+                            <div className="text-xs text-gray-400 truncate mt-0.5">
+                                {character.model3dSrc 
+                                    ? 'Eigenes GLB-Modell hinterlegt (wird in der Dungeon-Bühne genutzt)' 
+                                    : 'Noch kein eigenes 3D-Modell zugewiesen (nutzt den Standard-Dummy)'}
+                            </div>
+                            <label className="flex items-center gap-1.5 text-[11px] text-gray-300 mt-1.5 cursor-pointer select-none">
+                                <input
+                                    type="checkbox"
+                                    checked={glbHighResTextures}
+                                    onChange={(e) => setGlbHighResTextures(e.target.checked)}
+                                    className="rounded bg-gray-900 border-gray-600 text-cyan-500"
+                                />
+                                <span>Hauptfigur (Texturen bis 2048 px, sonst 1024 px)</span>
+                            </label>
                         </div>
-                        <div className="text-xs text-gray-400 truncate mt-0.5">
-                            {character.model3dSrc 
-                                ? 'Eigenes GLB-Modell hinterlegt (wird in der Dungeon-Bühne genutzt)' 
-                                : 'Noch kein eigenes 3D-Modell zugewiesen (nutzt den Standard-Dummy)'}
-                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                        <label className={`px-3.5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-lg flex items-center gap-2 transition-colors active:scale-95 ${isOptimizingGlb ? 'opacity-60 pointer-events-none' : ''}`}>
+                            {isOptimizingGlb ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                            <span>{isOptimizingGlb ? 'Optimiere...' : character.model3dSrc ? 'GLB ersetzen' : '.glb hochladen'}</span>
+                            <input
+                                type="file"
+                                accept=".glb,.gltf"
+                                className="hidden"
+                                disabled={isOptimizingGlb}
+                                onChange={async (e) => {
+                                    const file = e.target.files?.[0];
+                                    e.target.value = '';
+                                    if (!file) return;
+                                    setIsOptimizingGlb(true);
+                                    try {
+                                        const { blob, report } = await optimizeGlbBlob(file, {
+                                            role: 'character',
+                                            maxTextureSize: glbHighResTextures ? 2048 : 1024,
+                                            fileName: file.name,
+                                        });
+                                        const newId = `model3d_${crypto.randomUUID()}`;
+                                        await saveAsset(newId, blob, { kind: 'model', mime: 'model/gltf-binary' });
+                                        onChange({ model3dSrc: newId });
+                                        setGlbReport(report);
+                                    } catch (err) {
+                                        console.error("GLB upload error in Character editor:", err);
+                                    } finally {
+                                        setIsOptimizingGlb(false);
+                                    }
+                                }}
+                            />
+                        </label>
+                        {character.model3dSrc && (
+                            <button
+                                onClick={() => onChange({ model3dSrc: null })}
+                                className="p-2 bg-red-900/40 hover:bg-red-800 text-red-300 hover:text-white rounded-xl border border-red-700/50 transition-colors"
+                                title="GLB-Modell entfernen"
+                            >
+                                <Trash size={16} />
+                            </button>
+                        )}
                     </div>
                 </div>
 
-                <div className="flex items-center gap-2 flex-shrink-0">
-                    <label className="px-3.5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-lg flex items-center gap-2 transition-colors active:scale-95">
-                        <Upload size={14} />
-                        <span>{character.model3dSrc ? 'GLB ersetzen' : '.glb hochladen'}</span>
-                        <input
-                            type="file"
-                            accept=".glb,.gltf"
-                            className="hidden"
-                            onChange={async (e) => {
-                                const file = e.target.files?.[0];
-                                if (!file) return;
-                                try {
-                                    const reader = new FileReader();
-                                    reader.onload = async () => {
-                                        const base64 = reader.result as string;
-                                        const newId = `model3d_${crypto.randomUUID()}`;
-                                        await saveImage(newId, base64);
-                                        onChange({ model3dSrc: newId });
-                                    };
-                                    reader.readAsDataURL(file);
-                                } catch (err) {
-                                    console.error("GLB upload error in Character editor:", err);
-                                }
-                            }}
-                        />
-                    </label>
-                    {character.model3dSrc && (
-                        <button
-                            onClick={() => onChange({ model3dSrc: null })}
-                            className="p-2 bg-red-900/40 hover:bg-red-800 text-red-300 hover:text-white rounded-xl border border-red-700/50 transition-colors"
-                            title="GLB-Modell entfernen"
-                        >
-                            <Trash size={16} />
-                        </button>
-                    )}
-                </div>
+                {glbReport && (
+                    <div className="bg-gray-950/90 border border-cyan-800/50 rounded-lg p-3 text-xs space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="font-semibold text-cyan-300 truncate">
+                                Optimierungsbericht: {glbReport.fileName || 'Modell.glb'}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setGlbReport(null)}
+                                className="text-gray-400 hover:text-white"
+                                title="Bericht schließen"
+                            >
+                                <X size={14} />
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-[11px] text-gray-300">
+                            <div>
+                                <span className="text-gray-500 block">Größe</span>
+                                <span className="font-mono">
+                                    {formatBytes(glbReport.originalBytes)} → <strong className="text-emerald-400">{formatBytes(glbReport.optimizedBytes)}</strong>
+                                    {glbReport.originalBytes > 0 && glbReport.optimizedBytes < glbReport.originalBytes && (
+                                        <span className="text-emerald-400 ml-1">
+                                            (-{Math.round((1 - glbReport.optimizedBytes / glbReport.originalBytes) * 100)}%)
+                                        </span>
+                                    )}
+                                </span>
+                            </div>
+                            <div>
+                                <span className="text-gray-500 block">Dreiecke</span>
+                                <span className="font-mono">{glbReport.triangles.toLocaleString('de-DE')}</span>
+                            </div>
+                            <div>
+                                <span className="text-gray-500 block">Max. Textur</span>
+                                <span className="font-mono">
+                                    {glbReport.maxTextureResolution > 0 ? `${glbReport.maxTextureResolution} px` : 'Keine'}
+                                </span>
+                            </div>
+                        </div>
+                        {glbReport.warnings.length > 0 && (
+                            <div className="bg-amber-950/60 border border-amber-700/60 text-amber-200 rounded p-2 text-[11px] space-y-0.5">
+                                {glbReport.warnings.map((w, idx) => (
+                                    <div key={idx}>⚠ {w}</div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
 
             <div className="bg-gray-800 p-4 rounded border border-gray-700">
@@ -1169,6 +1239,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         value={character.emotions?.happy || null} 
                         onChange={val => onChange({ emotions: { ...character.emotions, happy: val } })} 
                         assets={assets}
+                        imagePreset="sprite"
                         defaultPrompt={`${character.name}, happy expression, smile, ${character.defaultDescription || ''}, anime visual novel style, high quality, white background`}
                     />
                     <ImageField 
@@ -1176,6 +1247,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         value={character.emotions?.angry || null} 
                         onChange={val => onChange({ emotions: { ...character.emotions, angry: val } })} 
                         assets={assets}
+                        imagePreset="sprite"
                         defaultPrompt={`${character.name}, angry expression, scowling, ${character.defaultDescription || ''}, anime visual novel style, high quality, white background`}
                     />
                     <ImageField 
@@ -1183,6 +1255,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         value={character.emotions?.thoughtful || null} 
                         onChange={val => onChange({ emotions: { ...character.emotions, thoughtful: val } })} 
                         assets={assets}
+                        imagePreset="sprite"
                         defaultPrompt={`${character.name}, thoughtful expression, hand on chin, ${character.defaultDescription || ''}, anime visual novel style, high quality, white background`}
                     />
                     <ImageField 
@@ -1190,6 +1263,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         value={character.emotions?.shy || null} 
                         onChange={val => onChange({ emotions: { ...character.emotions, shy: val } })} 
                         assets={assets}
+                        imagePreset="sprite"
                         defaultPrompt={`${character.name}, shy expression, blushing, slight smile, ${character.defaultDescription || ''}, anime visual novel style, high quality, white background`}
                     />
                     <ImageField 
@@ -1197,6 +1271,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         value={character.emotions?.sad || null} 
                         onChange={val => onChange({ emotions: { ...character.emotions, sad: val } })} 
                         assets={assets}
+                        imagePreset="sprite"
                         defaultPrompt={`${character.name}, sad expression, tearing up, looking down, ${character.defaultDescription || ''}, anime visual novel style, high quality, white background`}
                     />
                     <ImageField 
@@ -1204,6 +1279,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         value={character.emotions?.shocked || null} 
                         onChange={val => onChange({ emotions: { ...character.emotions, shocked: val } })} 
                         assets={assets}
+                        imagePreset="sprite"
                         defaultPrompt={`${character.name}, shocked expression, wide eyes, open mouth, ${character.defaultDescription || ''}, anime visual novel style, high quality, white background`}
                     />
                     <ImageField 
@@ -1211,6 +1287,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         value={character.emotions?.worried || null} 
                         onChange={val => onChange({ emotions: { ...character.emotions, worried: val } })} 
                         assets={assets}
+                        imagePreset="sprite"
                         defaultPrompt={`${character.name}, worried expression, sweat drop, anxious, ${character.defaultDescription || ''}, anime visual novel style, high quality, white background`}
                     />
                     <ImageField 
@@ -1218,6 +1295,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         value={character.emotions?.lustful || null} 
                         onChange={val => onChange({ emotions: { ...character.emotions, lustful: val } })} 
                         assets={assets}
+                        imagePreset="sprite"
                         defaultPrompt={`${character.name}, starry romantic eyes, slight blush, happy smile, ${character.defaultDescription || ''}, anime visual novel style, high quality, white background`}
                     />
                 </div>
@@ -1539,6 +1617,7 @@ const SceneEditor: React.FC<SceneEditorProps> = ({ scene, allScenes, allMaps, ch
                     value={scene.backgroundSrc} 
                     onChange={val => onChange({ backgroundSrc: val })} 
                     assets={assets}
+                    imagePreset="background"
                     defaultPrompt={`${scene.name}, ${scene.description || ''}, ${scene.sensoryDetails || ''}, anime visual novel scenery background illustration, beautiful digital painting, colorful, high resolution`}
                 />
                 <VideoField label="Intro Video (Optional)" value={scene.introVideoSrc || null} onChange={val => onChange({ introVideoSrc: val })} />
@@ -1906,6 +1985,7 @@ const MapEditor: React.FC<MapEditorProps> = ({ map, scenes, characters, allMaps,
                 value={map.backgroundSrc} 
                 onChange={val => onChange({ backgroundSrc: val })} 
                 assets={assets}
+                imagePreset="background"
                 defaultPrompt={`${map.name}, gorgeous fantasy top-down map, regional layout map design, rpg game map, hand-drawn digital painting, clean vector shapes, highly detailed`}
             />
 

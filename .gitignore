@@ -27,3 +27,6 @@ dist-ssr
 # local dev copy stays out of git (>100 MB files are rejected by GitHub)
 public/default-project/*.zip
 dev.log
+
+# Local project saves / unpacked exports (too large for Git)
+saves/

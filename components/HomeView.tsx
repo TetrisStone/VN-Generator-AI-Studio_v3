@@ -2,7 +2,8 @@ import React, { useRef } from 'react';
 import { Play, BookOpen, Settings as SettingsIcon, Castle, ChevronLeft, ChevronRight, ImagePlus, Trash2, ChevronDown, Feather, Plus } from 'lucide-react';
 import { ProjectMeta } from '../types';
 import { useI18n, TKey } from '../utils/i18n';
-import { saveImage, deleteImage } from '../utils/imageStorage';
+import { saveAsset, deleteAsset } from '../utils/assetStore';
+import { compressImage } from '../utils/compressImage';
 import { useStoredImage } from './ui/useStoredImage';
 import { OrnateFrame, FantasyButton } from './ui/Ornate';
 
@@ -79,30 +80,32 @@ export const HomeView: React.FC<HomeViewProps> = ({ meta, onUpdateMeta, hasSaveG
 
   const update = (patch: Partial<ProjectMeta>) => onUpdateMeta({ ...meta, ...patch });
 
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file || !file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = async ev => {
-      try {
-        const id = crypto.randomUUID();
-        await saveImage(id, ev.target?.result as string);
-        const old = meta.coverImageId;
-        update({ coverImageId: id });
-        if (old) deleteImage(old).catch(() => {});
-      } catch (err) {
-        console.error('Failed to save project image', err);
-        alert('Could not save the image.');
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const id = crypto.randomUUID();
+      const res = await compressImage(file, 'background');
+      await saveAsset(id, res.blob, {
+        kind: 'image',
+        mime: res.mime,
+        width: res.width,
+        height: res.height,
+      });
+      const old = meta.coverImageId;
+      update({ coverImageId: id });
+      if (old) deleteAsset(old).catch(() => {});
+    } catch (err) {
+      console.error('Failed to save project image', err);
+      alert('Could not save the image.');
+    }
   };
 
   const removeImage = () => {
     const old = meta.coverImageId;
     update({ coverImageId: null });
-    if (old) deleteImage(old).catch(() => {});
+    if (old) deleteAsset(old).catch(() => {});
   };
 
   const editedAt = lastEdited ?? meta.lastEdited;

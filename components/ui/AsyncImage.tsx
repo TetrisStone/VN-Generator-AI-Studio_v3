@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { loadImage } from '../../utils/imageStorage';
+import React from 'react';
+import { useAssetUrl } from './useAssetUrl';
 
 interface AsyncImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
     src: string | null | undefined;
@@ -8,21 +8,7 @@ interface AsyncImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
 }
 
 export const AsyncImage: React.FC<AsyncImageProps> = ({ src, fallbackColor, fallbackText, className, ...props }) => {
-    const [imgSrc, setImgSrc] = useState<string | null>(null);
-
-    useEffect(() => {
-        let isMounted = true;
-        const fetchImage = async () => {
-            if (src) {
-                const data = await loadImage(src);
-                if (isMounted) setImgSrc(data);
-            } else {
-                setImgSrc(null);
-            }
-        };
-        fetchImage();
-        return () => { isMounted = false; };
-    }, [src]);
+    const imgSrc = useAssetUrl(src);
 
     if (!imgSrc) {
         if (!fallbackText && !fallbackColor) return null;

@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { Character, RPGState, WorldMap, Scene, DungeonProject } from '../types';
 import { Save, LogOut, MapPin, Book } from 'lucide-react';
-import { loadImage } from '../utils/imageStorage';
+import { getAssetUrl, releaseAssetUrl } from '../utils/assetStore';
 
 // Default Icon (Speech Bubble)
 const DEFAULT_SCENE_ICON = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgiIGhlaWdodD0iMTI4IiB2aWV3Qm94PSIwIDAgMjQgMjQiIGZpbGw9IiMwNTk2NjkiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0yMSAxNWEyIDIgMCAwIDEtMiAySDdsLTQgNFY1YTIgMiAwIDAgMSAyLTJoMTRhMiAyIDAgMCAxIDIgMnoiLz48L3N2Zz4=";
@@ -47,13 +47,25 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
 
   useEffect(() => {
     let active = true;
+    const acquired: Array<[string, string]> = [];
+    const acquireUrl = async (id: string): Promise<string | null> => {
+      const url = await getAssetUrl(id);
+      if (!url) return null;
+      if (!active) {
+        releaseAssetUrl(id, url);
+        return null;
+      }
+      acquired.push([id, url]);
+      return url;
+    };
+
     const loadSprites = async () => {
         const promises: Promise<void>[] = [];
         
         // Load Background for active map
         if (mapConfig.backgroundSrc) {
             promises.push(
-               loadImage(mapConfig.backgroundSrc).then(data => {
+               acquireUrl(mapConfig.backgroundSrc).then(data => {
                    if (active) setBgDataUrl(data);
                })
             );
@@ -73,7 +85,7 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
         characters.forEach(c => {
             if (!c.mapSpriteSrc) return;
             promises.push(
-                loadImage(c.mapSpriteSrc)
+                acquireUrl(c.mapSpriteSrc)
                 .then(data => {
                     if (!data) return;
                     return new Promise<void>((resolve) => {
@@ -90,7 +102,7 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
         scenes.forEach(s => {
             if (!s.mapIconSrc) return;
             promises.push(
-               loadImage(s.mapIconSrc)
+               acquireUrl(s.mapIconSrc)
                .then(data => {
                    if (!data) return;
                    return new Promise<void>((resolve) => {
@@ -106,7 +118,12 @@ export const RPGWorld: React.FC<RPGWorldProps> = ({
         if (active) setSpritesLoaded(true);
     };
     loadSprites();
-    return () => { active = false; };
+    return () => {
+      active = false;
+      for (const [id, url] of acquired) {
+        releaseAssetUrl(id, url);
+      }
+    };
   }, [characters, scenes, mapConfig.backgroundSrc]);
 
   // --- Visibility Logic ---

@@ -1,20 +1,40 @@
-import { saveImage } from './imageStorage';
+import { dataUrlToBlob, detectAssetKind, saveAsset } from './assetStore';
 
-const isBase64Media = (str: string | null | undefined): boolean => {
-    return typeof str === 'string' && (str.startsWith('data:image/') || str.startsWith('data:video/') || str.startsWith('data:audio/'));
-};
-
-const getMediaType = (str: string): 'image' | 'video' | 'audio' | 'unknown' => {
-    if (str.startsWith('data:image/')) return 'image';
-    if (str.startsWith('data:video/')) return 'video';
-    if (str.startsWith('data:audio/')) return 'audio';
-    return 'unknown';
+const isBase64Media = (str: unknown): str is string => {
+    return typeof str === 'string' && /^data:(image|video|audio|model|application\/octet-stream)[;/,]/i.test(str);
 };
 
 export const extractImagesFromProject = async (data: any): Promise<any> => {
     let imagesCount = 0;
     let videosCount = 0;
     let audioCount = 0;
+    let modelCount = 0;
+
+    // Deduplicate identical inline payloads within the same project import
+    const dedupe = new Map<string, Array<{ raw: string; id: string }>>();
+
+    const storeDataUrl = async (raw: string): Promise<string> => {
+        const key = `${raw.length}:${raw.slice(0, 64)}:${raw.slice(-64)}`;
+        const bucket = dedupe.get(key);
+        if (bucket) {
+            const hit = bucket.find(entry => entry.raw === raw);
+            if (hit) return hit.id;
+        }
+
+        const blob = dataUrlToBlob(raw);
+        const id = crypto.randomUUID();
+        const rec = await saveAsset(id, blob);
+
+        if (rec.kind === 'image') imagesCount++;
+        else if (rec.kind === 'video') videosCount++;
+        else if (rec.kind === 'audio') audioCount++;
+        else if (rec.kind === 'model') modelCount++;
+
+        if (bucket) bucket.push({ raw, id });
+        else dedupe.set(key, [{ raw, id }]);
+
+        return id;
+    };
 
     const processObject = async (obj: any) => {
         if (!obj || typeof obj !== 'object') return;
@@ -22,31 +42,24 @@ export const extractImagesFromProject = async (data: any): Promise<any> => {
         if (Array.isArray(obj)) {
             for (let i = 0; i < obj.length; i++) {
                 if (isBase64Media(obj[i])) {
-                    const mediaType = getMediaType(obj[i]);
-                    const id = crypto.randomUUID();
-                    await saveImage(id, obj[i]);
-                    obj[i] = id;
-                    if (mediaType === 'image') imagesCount++;
-                    if (mediaType === 'video') videosCount++;
-                    if (mediaType === 'audio') audioCount++;
+                    obj[i] = await storeDataUrl(obj[i]);
                 } else {
                     await processObject(obj[i]);
                 }
             }
         } else {
-            for (const key in obj) {
-                if (Object.prototype.hasOwnProperty.call(obj, key)) {
-                    if (isBase64Media(obj[key])) {
-                        const mediaType = getMediaType(obj[key]);
-                        const id = crypto.randomUUID();
-                        await saveImage(id, obj[key]);
-                        obj[key] = id;
-                        if (mediaType === 'image') imagesCount++;
-                        if (mediaType === 'video') videosCount++;
-                        if (mediaType === 'audio') audioCount++;
+            for (const key of Object.keys(obj)) {
+                const val = obj[key];
+                if (isBase64Media(val)) {
+                    const id = await storeDataUrl(val);
+                    if (key === 'dataBase64') {
+                        obj.assetId = id;
+                        delete obj.dataBase64;
                     } else {
-                        await processObject(obj[key]);
+                        obj[key] = id;
                     }
+                } else {
+                    await processObject(val);
                 }
             }
         }
@@ -55,7 +68,9 @@ export const extractImagesFromProject = async (data: any): Promise<any> => {
     if (data) {
         await processObject(data);
     }
-    
-    console.log(`Extracted media into IndexedDB: ${imagesCount} images, ${videosCount} videos, ${audioCount} audio files.`);
+
+    console.log(
+        `Extracted media into IndexedDB assets: ${imagesCount} images, ${videosCount} videos, ${audioCount} audio, ${modelCount} 3D models (kind detector fallback: ${detectAssetKind('image/png')}).`
+    );
     return data;
 };
