@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   HardDrive,
   Image as ImageIcon,
@@ -43,10 +43,13 @@ export const StorageOptimizer: React.FC<StorageOptimizerProps> = ({ onFlushSave 
   const [progress, setProgress] = useState<BatchOptimizeProgress | null>(null);
   const [batchResult, setBatchResult] = useState<BatchOptimizeResult | null>(null);
 
+  const onFlushSaveRef = useRef(onFlushSave);
+  onFlushSaveRef.current = onFlushSave;
+
   const refreshReport = useCallback(async () => {
     setIsScanning(true);
     try {
-      await onFlushSave?.().catch(() => {});
+      await onFlushSaveRef.current?.().catch(() => {});
       const next = await analyzeStorage();
       setReport(next);
     } catch (err) {
@@ -54,7 +57,7 @@ export const StorageOptimizer: React.FC<StorageOptimizerProps> = ({ onFlushSave 
     } finally {
       setIsScanning(false);
     }
-  }, [onFlushSave]);
+  }, []);
 
   useEffect(() => {
     refreshReport();
@@ -76,7 +79,7 @@ export const StorageOptimizer: React.FC<StorageOptimizerProps> = ({ onFlushSave 
     });
 
     try {
-      await onFlushSave?.().catch(() => {});
+      await onFlushSaveRef.current?.().catch(() => {});
       const result = await optimizeAllExistingAssets((p) => setProgress(p));
       setBatchResult(result);
       await refreshReport();
@@ -98,7 +101,7 @@ export const StorageOptimizer: React.FC<StorageOptimizerProps> = ({ onFlushSave 
 
     setIsDeletingOrphans(true);
     try {
-      await onFlushSave?.().catch(() => {});
+      await onFlushSaveRef.current?.().catch(() => {});
       await deleteOrphanedAssets(report.orphaned.map((a) => a.id));
       await refreshReport();
     } catch (err) {
@@ -136,7 +139,7 @@ export const StorageOptimizer: React.FC<StorageOptimizerProps> = ({ onFlushSave 
         <FantasyButton
           inline
           icon={<RefreshCw size={14} className={isScanning ? 'animate-spin' : ''} />}
-          onClick={refreshReport}
+          onClick={() => refreshReport()}
           disabled={isScanning || isOptimizing}
         >
           Aktualisieren
