@@ -31,12 +31,17 @@ export interface OptimizeGlbResult {
 const CHARACTER_MAX_BYTES = 5 * 1024 * 1024;
 const CHARACTER_MAX_TRIANGLES = 20_000;
 const CHUNK_MAX_BYTES = 2 * 1024 * 1024;
+const WORKER_TIMEOUT_MS = 20_000;
 
 let workerInstance: Worker | null = null;
 let nextRequestId = 1;
 const pendingRequests = new Map<
   number,
-  { resolve: (res: GlbWorkerResponse) => void; reject: (err: Error) => void }
+  {
+    resolve: (res: GlbWorkerResponse) => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }
 >();
 
 const resetWorker = (err: Error) => {
@@ -45,6 +50,7 @@ const resetWorker = (err: Error) => {
     workerInstance = null;
   }
   for (const pending of pendingRequests.values()) {
+    clearTimeout(pending.timer);
     pending.reject(err);
   }
   pendingRequests.clear();
@@ -59,6 +65,7 @@ const getWorker = (): Worker => {
       const msg = ev.data;
       const pending = pendingRequests.get(msg.id);
       if (!pending) return;
+      clearTimeout(pending.timer);
       pendingRequests.delete(msg.id);
       pending.resolve(msg);
     };
@@ -81,7 +88,14 @@ const runWorkerOptimize = (
   const worker = getWorker();
   const transferableBuffer = buffer.slice(0);
   return new Promise((resolve, reject) => {
-    pendingRequests.set(id, { resolve, reject });
+    const timer = setTimeout(() => {
+      if (pendingRequests.has(id)) {
+        resetWorker(
+          new Error(`Zeitüberschreitung (${WORKER_TIMEOUT_MS / 1000} s) bei der GLB-Optimierung`)
+        );
+      }
+    }, WORKER_TIMEOUT_MS);
+    pendingRequests.set(id, { resolve, reject, timer });
     const req: GlbWorkerRequest = {
       id,
       buffer: transferableBuffer,

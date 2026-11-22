@@ -12,6 +12,14 @@ export default defineConfig(({ mode }) => {
         allowedHosts: ['.novita.ai'],
       },
       plugins: [react()],
+      optimizeDeps: {
+        include: [
+          '@gltf-transform/core',
+          '@gltf-transform/extensions',
+          '@gltf-transform/functions',
+          'meshoptimizer',
+        ],
+      },
       worker: {
         format: 'es',
       },

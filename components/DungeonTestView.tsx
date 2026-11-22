@@ -7,9 +7,11 @@ import {
   Trash2, Sliders, Film, HelpCircle, Layers, Box, Grid, Square, DoorClosed, Layers as LayersIcon, Move, X,
   Users, Swords
 } from 'lucide-react';
-import { Character, Scene, DungeonProject, DungeonBaseGLB } from '../types';
+import { AbilityAnimConfig, BattleClipKey, Character, Scene, DungeonProject, DungeonBaseGLB } from '../types';
 import { getItem, setItem as setKeyvalItem } from '../utils/db';
-import { Party, Animator } from './battle/figures';
+import { Party } from './battle/figures';
+import { Model3dAnimationModal, type AnimationConfigPatch } from './battle/CharacterModel3dAnimations';
+import { BattleAnimator, autoMapClipNames, ensureUniqueMaterials, stripRootMotion } from '../battle/animation';
 import { useBattleScene, type BattleBridge, type EnemyStateMap } from './battle/useBattleScene';
 import { BattleOverlay } from './battle/BattleOverlay';
 import { saveAsset } from '../utils/assetStore';
@@ -62,6 +64,9 @@ interface StoredGLBConfig {
   rotationY?: number;
   idleClipName?: string;
   runClipName?: string;
+  model3dClips?: Partial<Record<BattleClipKey, string>>;
+  model3dImpactTimes?: Partial<Record<BattleClipKey, number>>;
+  model3dAbilityAnims?: Record<string, AbilityAnimConfig>;
 }
 
 interface StoredEnvironmentGLBConfig {
@@ -147,6 +152,9 @@ interface NpcLibraryEntry {
   fileSize: number;
   assetId?: string;
   dataBase64?: string; // Legacy Data URL fallback
+  model3dClips?: Partial<Record<BattleClipKey, string>>;
+  model3dImpactTimes?: Partial<Record<BattleClipKey, number>>;
+  model3dAbilityAnims?: Record<string, AbilityAnimConfig>;
 }
 
 // One placed NPC/enemy copy standing on a walkable sub-tile of a section
@@ -637,9 +645,67 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
   // Base chunk/character GLB file data (incl. config) for the project snapshot
   const [baseDataState, setBaseDataState] = useState<{ floor: DungeonBaseGLB | null; wall: DungeonBaseGLB | null; door: DungeonBaseGLB | null; char: DungeonBaseGLB | null }>({ floor: null, wall: null, door: null, char: null });
+  const baseDataCharRef = useRef<DungeonBaseGLB | null>(null);
+  useEffect(() => {
+    baseDataCharRef.current = baseDataState.char;
+  }, [baseDataState.char]);
   const setBaseData = useCallback((part: 'floor' | 'wall' | 'door' | 'char', data: DungeonBaseGLB | null) => {
+    if (part === 'char') baseDataCharRef.current = data;
     setBaseDataState(prev => ({ ...prev, [part]: data }));
   }, []);
+
+  // Unified Battle Animation Mapping Modal target (base character GLB or npcLibrary entry)
+  const [animModalTarget, setAnimModalTarget] = useState<{ kind: 'baseChar' } | { kind: 'npcLib'; entryId: string } | null>(null);
+
+  const updateBaseCharAnims = useCallback((patch: AnimationConfigPatch) => {
+    setBaseDataState(prev => {
+      if (!prev.char) return prev;
+      const nextChar: DungeonBaseGLB = {
+        ...prev.char,
+        model3dClips: patch.model3dClips,
+        model3dImpactTimes: patch.model3dImpactTimes,
+        model3dAbilityAnims: patch.model3dAbilityAnims,
+      };
+      baseDataCharRef.current = nextChar;
+      if (!isProjectModeRef.current) {
+        getItem<StoredGLBConfig>(STORAGE_KEY_CHAR_GLB).then(stored => {
+          if (stored) {
+            setKeyvalItem(STORAGE_KEY_CHAR_GLB, {
+              ...stored,
+              model3dClips: patch.model3dClips,
+              model3dImpactTimes: patch.model3dImpactTimes,
+              model3dAbilityAnims: patch.model3dAbilityAnims,
+            });
+          }
+        }).catch(err => console.warn('Could not save base char animation mapping:', err));
+      }
+      return { ...prev, char: nextChar };
+    });
+    if (patch.model3dClips?.idle) {
+      setSelectedIdleClip(patch.model3dClips.idle);
+      selectedIdleClipRef.current = patch.model3dClips.idle;
+    }
+    if (patch.model3dClips?.run) {
+      setSelectedRunClip(patch.model3dClips.run);
+      selectedRunClipRef.current = patch.model3dClips.run;
+    }
+  }, []);
+
+  const updateNpcLibAnims = useCallback((entryId: string, patch: AnimationConfigPatch) => {
+    const next = npcLibraryRef.current.map(entry =>
+      entry.id === entryId
+        ? {
+            ...entry,
+            model3dClips: patch.model3dClips,
+            model3dImpactTimes: patch.model3dImpactTimes,
+            model3dAbilityAnims: patch.model3dAbilityAnims,
+          }
+        : entry
+    );
+    npcLibraryRef.current = next;
+    setNpcLibrary(next);
+    setItem(NPC_LIBRARY_KEY, next).catch(err => console.warn('Could not save npc library animations:', err));
+  }, [setItem]);
 
   // Restore helper: in project mode every dungeon field comes from the
   // project bundle; standalone sandbox reads its classic keyval keys
@@ -1404,6 +1470,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         });
       }
     });
+    ensureUniqueMaterials(model);
 
     // Compute bounding box and normalize scale & pivot to bottom-center
     const box = new THREE.Box3().setFromObject(model);
@@ -1458,8 +1525,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     sceneRef.current.add(root);
     characterRootRef.current = root;
 
-    // Process Animations
-    const clips = gltf.animations || [];
+    // Process Animations (strip X/Z root motion so characters stay on their tile)
+    const clips = stripRootMotion(gltf.animations || [], model);
     gltfClipsMapRef.current.clear();
     const clipNames: string[] = [];
 
@@ -2953,8 +3020,13 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
               if (storedGLB.useRawScale !== undefined) setUseRawCharacterScale(storedGLB.useRawScale);
               if (storedGLB.offsetY !== undefined) setModelOffsetY(storedGLB.offsetY);
               if (storedGLB.rotationY !== undefined) setModelRotationY(storedGLB.rotationY);
+              if (!isProjectModeRef.current) setBaseData('char', storedGLB as DungeonBaseGLB);
 
-              mountGLBModelRef.current(gltf, storedGLB);
+              mountGLBModelRef.current(gltf, {
+                ...storedGLB,
+                idleClipName: storedGLB.model3dClips?.idle || storedGLB.idleClipName,
+                runClipName: storedGLB.model3dClips?.run || storedGLB.runClipName,
+              });
             });
             return;
           }
@@ -3314,6 +3386,9 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
     // Mount one NPC/enemy GLB on a sub-tile of the dungeon (idle animation)
     const mountNpcInstance = (inst: PlacedNpcInstance, gltf: { scene: THREE.Group; animations: THREE.AnimationClip[] }) => {
+      const linkedChar = inst.characterId
+        ? charactersRef.current.find(c => c.id === inst.characterId)
+        : undefined;
       const holder = new THREE.Group();
       holder.name = `PlacedNpc_${inst.id}`;
       // Clone via SkeletonUtils: AnimationMixer works on skinned clones too
@@ -3337,16 +3412,22 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           });
         }
       });
-      // Bottom-center pivot + approx. player height (1.85m), like the dummy
+      ensureUniqueMaterials(model);
+
+      // Bottom-center pivot + approx. player height (1.85m), adjusted by character transform
       const box = new THREE.Box3().setFromObject(model);
       const size = box.getSize(new THREE.Vector3());
       const center = box.getCenter(new THREE.Vector3());
       const baseScale = size.y > 0.001 ? 1.85 / size.y : 1.0;
+      const charScale = linkedChar?.model3dScale ?? 1.0;
+      const charOffsetY = linkedChar?.model3dOffsetY ?? 0.0;
+      const charRotY = ((linkedChar?.model3dRotationY ?? 0) * Math.PI) / 180;
       model.position.set(-center.x, -box.min.y, -center.z);
       const inner = new THREE.Group();
       inner.name = 'NpcInnerAdjuster';
       inner.add(model);
-      inner.scale.setScalar(baseScale);
+      inner.scale.setScalar(baseScale * charScale);
+      inner.rotation.y = charRotY;
       holder.add(inner);
 
       const surfaceY = getPickPlaneY();
@@ -3360,25 +3441,32 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       shadowMesh.rotation.x = -Math.PI / 2;
       shadowMesh.position.y = surfaceY + 0.02;
       holder.add(shadowMesh);
-      // Lift the model to the floor surface height
-      inner.position.y = surfaceY;
+      // Lift the model to the floor surface height (+ optional character Y offset)
+      inner.position.y = surfaceY + charOffsetY;
 
       holder.rotation.y = (inst.rotationY * Math.PI) / 180;
       holder.visible = (inst.sectionId ?? 'root') === activeSectionRef.current && !isEnemyGone(inst);
+      const cleanClips = stripRootMotion(gltf.animations || [], model);
       holder.userData = {
         npcId: inst.id,
         libraryId: inst.libraryId,
         npcKind: inst.kind,
         sectionId: inst.sectionId ?? 'root',
-        // Battle: animation access for attack / hit / dizzy clips
-        clips: gltf.animations,
+        // Battle: stripped animation access for attack / hit / dizzy / defeat clips
+        clips: cleanClips,
         mixer: null as THREE.AnimationMixer | null,
         idleAction: null as THREE.AnimationAction | null
       };
       placedNpcsGroup.add(holder);
 
-      // Start the idle animation of this character
-      const idleClip = gltf.animations.find(c => /idle|stand|wait|pose/i.test(c.name)) || gltf.animations[0];
+      // Start the idle animation of this character (respecting dungeon library + character mapping)
+      const libEntry = npcLibraryRef.current.find(e => e.id === inst.libraryId);
+      const mergedIdleOverrides =
+        libEntry?.model3dClips || linkedChar?.model3dClips
+          ? { ...libEntry?.model3dClips, ...linkedChar?.model3dClips }
+          : undefined;
+      const mapped = autoMapClipNames(cleanClips.map(c => c.name), { model3dClips: mergedIdleOverrides });
+      const idleClip = (mapped.idle ? cleanClips.find(c => c.name === mapped.idle) : undefined) || cleanClips[0];
       if (idleClip) {
         const mixer = new THREE.AnimationMixer(model);
         const idleAction = mixer.clipAction(idleClip);
@@ -4420,6 +4508,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         dungeonId: () => dungeonIdOf(),
         characters: () => charactersRef.current,
         party: () => partyRef.current,
+        npcLibrary: () => npcLibraryRef.current,
         figures: () => placedNpcsRef.current,
         figureHolder: (id: string) => placedNpcsGroup.children.find(ch => ch.userData?.npcId === id),
         figureName: (f) => charactersRef.current.find(c => c.id === f.characterId)?.name
@@ -4427,12 +4516,33 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           ?? 'Gegner',
         leaderRoot: () => characterRootRef.current,
         leaderTile: () => ({ ...currentTileRef.current }),
-        leaderAnimator: () => new Animator(animationMixerRef.current, [...gltfClipsMapRef.current.values()], {
-          idle: selectedIdleClipRef.current,
-          run: selectedRunClipRef.current,
-          current: activeActionRef.current,
-          onChange: (a) => { activeActionRef.current = a; },
-        }),
+        leaderAnimator: () => {
+          const leaderCid = partyRef.current?.leaderEntry.characterId;
+          const leaderChar = leaderCid ? charactersRef.current.find(c => c.id === leaderCid) : undefined;
+          const baseChar = baseDataCharRef.current;
+          const mergedClips =
+            leaderChar?.model3dClips || baseChar?.model3dClips
+              ? { ...leaderChar?.model3dClips, ...baseChar?.model3dClips }
+              : undefined;
+          const mergedImpacts =
+            leaderChar?.model3dImpactTimes || baseChar?.model3dImpactTimes
+              ? { ...leaderChar?.model3dImpactTimes, ...baseChar?.model3dImpactTimes }
+              : undefined;
+          const mergedAbilities =
+            leaderChar?.model3dAbilityAnims || baseChar?.model3dAbilityAnims
+              ? { ...leaderChar?.model3dAbilityAnims, ...baseChar?.model3dAbilityAnims }
+              : undefined;
+          return new BattleAnimator(animationMixerRef.current, [...gltfClipsMapRef.current.values()], {
+            characterName: leaderChar?.name ?? baseChar?.fileName?.replace(/\.(glb|gltf)$/i, '') ?? 'Anführer',
+            model3dClips: mergedClips,
+            model3dImpactTimes: mergedImpacts,
+            model3dAbilityAnims: mergedAbilities,
+            idle: selectedIdleClipRef.current,
+            run: selectedRunClipRef.current,
+            current: activeActionRef.current,
+            onChange: (a) => { activeActionRef.current = a; },
+          });
+        },
         leaderStop: () => {
           moveQueueRef.current = [];
           targetWorldPosRef.current = null;
@@ -5037,6 +5147,16 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
               <option value="">— Keine Szene (E: leer) —</option>
               {scenes.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
+            {npcLibrary.some(e => e.id === selectedNpc.libraryId) && (
+              <button
+                onClick={() => setAnimModalTarget({ kind: 'npcLib', entryId: selectedNpc.libraryId })}
+                className="px-2.5 py-1.5 bg-purple-950/70 hover:bg-purple-800 text-purple-200 border border-purple-700/60 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                title="Kampf-Animationen dieser 3D-Figur zuordnen"
+              >
+                <Film size={13} />
+                <span>Animationen</span>
+              </button>
+            )}
             <button
               onClick={removeSelectedNpc}
               className="px-2.5 py-1.5 bg-rose-950/70 hover:bg-rose-800 text-rose-200 border border-rose-700/60 rounded-lg text-xs font-semibold transition-colors"
@@ -5379,6 +5499,18 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                               <span className="max-w-[140px] truncate" title={entry.fileName}>{entry.fileName}</span>
                             </button>
                             <button
+                              onClick={() => setAnimModalTarget({ kind: 'npcLib', entryId: entry.id })}
+                              className={`px-1.5 py-1 transition-colors ${
+                                (entry.model3dClips && Object.keys(entry.model3dClips).length > 0) ||
+                                (entry.model3dAbilityAnims && Object.keys(entry.model3dAbilityAnims).length > 0)
+                                  ? 'text-purple-300 hover:text-purple-100'
+                                  : 'text-gray-400 hover:text-purple-300'
+                              }`}
+                              title="Kampf-Animationen & Fähigkeiten dieser Figur zuordnen"
+                            >
+                              <Film size={11} />
+                            </button>
+                            <button
                               onClick={() => removeNpcLibraryEntry(entry.id)}
                               className="px-1.5 py-1 text-rose-300 hover:text-rose-200 transition-colors"
                               title="Datei aus Bibliothek entfernen (entfernt auch alle platzierten Kopien)"
@@ -5496,8 +5628,21 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
                     {/* Animation Clip Selectors */}
                     <div className="space-y-2">
-                      <div className="text-gray-400 font-semibold flex items-center gap-1">
-                        <Film size={13} className="text-purple-400" /> Animationen ({availableClips.length} gefunden):
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-gray-400 font-semibold flex items-center gap-1">
+                          <Film size={13} className="text-purple-400" /> Animationen ({availableClips.length} gefunden):
+                        </div>
+                        {(baseDataState.char?.assetId || baseDataState.char?.dataBase64) && (
+                          <button
+                            type="button"
+                            onClick={() => setAnimModalTarget({ kind: 'baseChar' })}
+                            className="px-2 py-1 rounded-lg bg-purple-700/80 hover:bg-purple-600 text-white text-[11px] font-semibold flex items-center gap-1 shadow transition-colors"
+                            title="Alle Kampf-Clips, Trefferzeitpunkte und Fähigkeiten zuordnen"
+                          >
+                            <Film size={11} />
+                            <span>Kampf-Clips zuordnen</span>
+                          </button>
+                        )}
                       </div>
 
                       {availableClips.length > 0 ? (
@@ -6465,6 +6610,41 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         )}
       </div>
       )}
+
+      {/* Unified Battle Animation Assignment Modal (base character or npcLibrary entry) */}
+      {animModalTarget && (() => {
+        if (animModalTarget.kind === 'baseChar') {
+          const base = baseDataState.char;
+          const src = base?.assetId || base?.dataBase64;
+          if (!src) return null;
+          return (
+            <Model3dAnimationModal
+              modelSrc={src}
+              title={base.fileName || customModelName}
+              rotationY={modelRotationY}
+              clips={base.model3dClips}
+              impactTimes={base.model3dImpactTimes}
+              abilityAnims={base.model3dAbilityAnims}
+              onChange={updateBaseCharAnims}
+              onClose={() => setAnimModalTarget(null)}
+            />
+          );
+        }
+        const entry = npcLibrary.find(e => e.id === animModalTarget.entryId);
+        const src = entry?.assetId || entry?.dataBase64;
+        if (!entry || !src) return null;
+        return (
+          <Model3dAnimationModal
+            modelSrc={src}
+            title={entry.fileName}
+            clips={entry.model3dClips}
+            impactTimes={entry.model3dImpactTimes}
+            abilityAnims={entry.model3dAbilityAnims}
+            onChange={(patch) => updateNpcLibAnims(entry.id, patch)}
+            onClose={() => setAnimModalTarget(null)}
+          />
+        );
+      })()}
     </div>
   );
 };

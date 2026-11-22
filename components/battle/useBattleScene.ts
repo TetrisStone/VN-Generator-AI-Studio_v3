@@ -1,9 +1,9 @@
 // Binds the pure battle engine to the existing Three.js dungeon scene:
-// detection, arena grids, camera, figure movement and event playback.
+// detection, arena grids, camera, figure movement and animated event playback.
 // DungeonTestView only provides a BattleBridge and forwards input / ticks.
 import * as THREE from 'three';
 import { useCallback, useMemo, useRef, useState } from 'react';
-import type { Character } from '../../types';
+import type { AbilityAnimConfig, BattleClipKey, Character } from '../../types';
 import { chooseRespawnTile, detectEncounter, selectEnemyGroup, tileDist, type EnemyCandidate, type Encounter, type Tile } from '../../battle/detection';
 import { gridToWorldTile, placeSide, selectArena, type Arena, type Chunk } from '../../battle/arena';
 import {
@@ -14,8 +14,15 @@ import { decideEnemyAction } from '../../battle/ai';
 import { resolveEnemyStats } from '../../battle/stats';
 import { randomSeed } from '../../battle/rng';
 import { getAbility } from '../../battle/abilities';
+import {
+  BattleAnimator,
+  BattleEventQueue,
+  ensureUniqueMaterials,
+  setObjectOpacity,
+  setObjectRedEmissive,
+} from '../../battle/animation';
 import type { ActionId, BattleAction, BattleEvent, BattleState, CombatantInit, GridPos, Outcome, Side } from '../../battle/types';
-import { Animator, type ClipKind, type Party } from './figures';
+import type { Party } from './figures';
 
 // ---------------------------------------------------------------------------
 // Bridge & UI types
@@ -50,12 +57,18 @@ export interface BattleBridge {
   dungeonId(): string;
   characters(): Character[];
   party(): Party | null;
+  npcLibrary(): Array<{
+    id: string;
+    model3dClips?: Partial<Record<BattleClipKey, string>>;
+    model3dImpactTimes?: Partial<Record<BattleClipKey, number>>;
+    model3dAbilityAnims?: Record<string, AbilityAnimConfig>;
+  }>;
   figures(): PlacedFigureLike[];
   figureHolder(id: string): THREE.Object3D | undefined;
   figureName(f: PlacedFigureLike): string;
   leaderRoot(): THREE.Object3D | null;
   leaderTile(): Tile;
-  leaderAnimator(): Animator;
+  leaderAnimator(): BattleAnimator;
   leaderStop(): void;
   /** Sync the movement engine after the battle moved / teleported the leader */
   leaderSync(tile: Tile, facing: number): void;
@@ -109,18 +122,18 @@ interface Fighter {
   id: string;
   side: Side;
   isLeader: boolean;
+  persistentAnimator: boolean;
   root: THREE.Object3D;
   baseY: number;
-  anim: () => Animator;
+  anim: () => BattleAnimator;
   home: THREE.Vector3;
   /** Enemies: dungeon start transform (defeat reset) */
   origin?: { x: number; z: number; rotY: number; tile: Tile };
   /** Fallback figure created for the battle only (removed afterwards) */
   temp?: boolean;
   stars: THREE.Group;
-  shield: THREE.Mesh;
+  shield: THREE.Group;
   shownStatus: 'active' | 'dizzy' | 'defeated';
-  shake: number;
 }
 
 interface GridTile {
@@ -169,12 +182,14 @@ export class BattleDirector {
   private fx = new THREE.Group();
   private tweens: Tween[] = [];
   private savedCam: { pos: THREE.Vector3; target: THREE.Vector3; frustum: number } | null = null;
+  private arenaCamPos: THREE.Vector3 | null = null;
   private hoverKey: string | null = null;
   private floaterSeq = 1;
   private elapsed = 0;
   private disposed = false;
   private raycaster = new THREE.Raycaster();
   private involvedEnemyOrigins: Array<Tile & { ini: number }> = [];
+  private queue = new BattleEventQueue();
   private onResize = () => this.computeAnchors();
 
   constructor(private b: BattleBridge, private pushUi: (ui: BattleUi) => void) {
@@ -186,10 +201,16 @@ export class BattleDirector {
   dispose() {
     this.disposed = true;
     window.removeEventListener('resize', this.onResize);
+    this.queue.clear();
+    for (const tw of [...this.tweens]) tw.resolve();
     this.tweens = [];
+    for (const f of this.fighters.values()) {
+      f.anim().cancelPending();
+      if (!f.persistentAnimator) f.anim().dispose();
+      if (f.temp) this.b.scene.remove(f.root);
+    }
     this.removeGrid();
     this.b.scene.remove(this.fx);
-    for (const f of this.fighters.values()) if (f.temp) this.b.scene.remove(f.root);
   }
 
   private emit(patch: Partial<BattleUi>) {
@@ -232,8 +253,15 @@ export class BattleDirector {
       const p = f.root.position;
       f.stars.position.set(p.x, surface + 2.15, p.z);
       f.stars.rotation.y = elapsed * 3;
-      f.shield.position.set(p.x, surface + 0.95, p.z);
-      (f.shield.material as THREE.MeshBasicMaterial).opacity = 0.14 + Math.sin(elapsed * 4) * 0.04;
+      // Position translucent barrier in front of the figure facing outward
+      const fwdX = Math.sin(f.root.rotation.y);
+      const fwdZ = Math.cos(f.root.rotation.y);
+      f.shield.position.set(p.x + fwdX * 0.62, surface + 1.0, p.z + fwdZ * 0.62);
+      f.shield.rotation.y = f.root.rotation.y;
+      const pulseOp = 0.28 + Math.sin(elapsed * 4) * 0.08;
+      f.shield.children.forEach((ch: any) => {
+        if (ch.material) ch.material.opacity = ch.userData?.edge ? pulseOp * 1.9 : pulseOp;
+      });
     }
   }
 
@@ -300,7 +328,7 @@ export class BattleDirector {
     return new THREE.Vector3(p.x, 0, p.z);
   }
 
-  private makeStatusFx(): { stars: THREE.Group; shield: THREE.Mesh } {
+  private makeStatusFx(): { stars: THREE.Group; shield: THREE.Group } {
     const stars = new THREE.Group();
     for (let k = 0; k < 3; k++) {
       const s = new THREE.Mesh(
@@ -312,10 +340,32 @@ export class BattleDirector {
       stars.add(s);
     }
     stars.visible = false;
-    const shield = new THREE.Mesh(
-      new THREE.SphereGeometry(0.85, 20, 14),
-      new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.15, blending: THREE.AdditiveBlending, depthWrite: false })
+
+    const shield = new THREE.Group();
+    const plate = new THREE.Mesh(
+      new THREE.CircleGeometry(0.55, 6),
+      new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.28,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      })
     );
+    const rim = new THREE.Mesh(
+      new THREE.RingGeometry(0.49, 0.56, 6),
+      new THREE.MeshBasicMaterial({
+        color: 0x7dd3fc,
+        transparent: true,
+        opacity: 0.55,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      })
+    );
+    rim.userData.edge = true;
+    shield.add(plate, rim);
     shield.visible = false;
     this.fx.add(stars, shield);
     return { stars, shield };
@@ -336,6 +386,8 @@ export class BattleDirector {
     const trigger = pool.find(p => p.id === enc.triggerId);
     if (!party || !trigger) return;
     this.active = true;
+    this.queue.clear();
+    this.queue = new BattleEventQueue();
     this.b.leaderStop();
     party.hurry();
 
@@ -378,22 +430,30 @@ export class BattleDirector {
     }
     this.state = createBattle(inits, enc.initiative, randomSeed());
 
-    // --- fighters
+    // --- fighters (reusing existing scene objects + single AnimationMixer per figure)
     this.fighters.clear();
     const leaderRoot = this.b.leaderRoot();
+    const leaderAnimator = this.b.leaderAnimator();
     for (const h of heroOrder) {
       const isLeader = h.entry.id === party.roster[0].id;
       const fol = party.followers.find(f => f.entry.id === h.entry.id);
       const root = isLeader ? leaderRoot : fol?.root;
       if (!root) continue;
+      ensureUniqueMaterials(root);
+      setObjectOpacity(root, 1);
+      setObjectRedEmissive(root, 0);
       const { stars, shield } = this.makeStatusFx();
-      const cached = fol?.animator;
+      const animator = isLeader
+        ? leaderAnimator
+        : fol?.animator ?? new BattleAnimator(null, [], { characterName: h.entry.name });
       this.fighters.set(h.entry.id, {
-        id: h.entry.id, side: 'hero', isLeader, root, baseY: root.position.y,
-        anim: isLeader ? () => this.b.leaderAnimator() : () => cached ?? new Animator(null, []),
-        home: this.gridWorld('hero', heroPos.get(h.entry.id)!), stars, shield, shownStatus: 'active', shake: 0,
+        id: h.entry.id, side: 'hero', isLeader, persistentAnimator: !isLeader, root, baseY: root.position.y,
+        anim: () => animator,
+        home: this.gridWorld('hero', heroPos.get(h.entry.id)!), stars, shield, shownStatus: 'active',
       });
     }
+    const chars = this.b.characters();
+    const npcLib = this.b.npcLibrary();
     for (const e of enemiesSorted) {
       let root = this.b.figureHolder(e.id);
       let temp = false;
@@ -403,12 +463,37 @@ export class BattleDirector {
         root.position.set(p.x, 0, p.z);
         temp = true;
       }
+      ensureUniqueMaterials(root);
+      setObjectOpacity(root, 1);
+      setObjectRedEmissive(root, 0);
       const ud = root.userData ?? {};
-      const animator = new Animator(ud.mixer ?? null, ud.clips ?? [], { current: ud.idleAction ?? null });
+      const libEntry = npcLib.find(x => x.id === e.fig.libraryId);
+      const linkedChar = e.fig.characterId ? chars.find(c => c.id === e.fig.characterId) : undefined;
+      const mergedClips =
+        libEntry?.model3dClips || linkedChar?.model3dClips
+          ? { ...libEntry?.model3dClips, ...linkedChar?.model3dClips }
+          : undefined;
+      const mergedImpacts =
+        libEntry?.model3dImpactTimes || linkedChar?.model3dImpactTimes
+          ? { ...libEntry?.model3dImpactTimes, ...linkedChar?.model3dImpactTimes }
+          : undefined;
+      const mergedAbilities =
+        libEntry?.model3dAbilityAnims || linkedChar?.model3dAbilityAnims
+          ? { ...libEntry?.model3dAbilityAnims, ...linkedChar?.model3dAbilityAnims }
+          : undefined;
+      const animator = new BattleAnimator(ud.mixer ?? null, ud.clips ?? [], {
+        characterName: this.b.figureName(e.fig),
+        model3dClips: mergedClips,
+        model3dImpactTimes: mergedImpacts,
+        model3dAbilityAnims: mergedAbilities,
+        current: ud.idleAction ?? null,
+        onChange: (a) => { ud.idleAction = a; },
+      });
       const { stars, shield } = this.makeStatusFx();
       this.fighters.set(e.id, {
-        id: e.id, side: 'enemy', isLeader: false, root, baseY: root.position.y, anim: () => animator,
-        home: this.gridWorld('enemy', enemyPos.get(e.id)!), stars, shield, shownStatus: 'active', shake: 0, temp,
+        id: e.id, side: 'enemy', isLeader: false, persistentAnimator: false, root, baseY: root.position.y,
+        anim: () => animator,
+        home: this.gridWorld('enemy', enemyPos.get(e.id)!), stars, shield, shownStatus: 'active', temp,
         origin: { x: root.position.x, z: root.position.z, rotY: root.rotation.y, tile: { col: e.col, row: e.row } },
       });
     }
@@ -419,7 +504,7 @@ export class BattleDirector {
       state: this.state,
       banner: { text: enc.kind === 'first_strike' ? 'Erstschlag!' : 'Hinterhalt!', tone: enc.initiative },
     });
-    void this.intro().catch(err => {
+    void this.queue.enqueue(() => this.intro()).catch(err => {
       console.error('[battle] intro failed:', err);
     });
   }
@@ -504,6 +589,25 @@ export class BattleDirector {
       camera.lookAt(camTarget);
       this.b.setFrustum(fromF + (targetFrustum - fromF) * e);
     });
+    this.arenaCamPos = camera.position.clone();
+  }
+
+  private async shakeCamera(intensity = 0.2, dur = 0.22) {
+    const base = this.arenaCamPos;
+    if (!base || !this.active || this.disposed) return;
+    const { camera, camTarget } = this.b;
+    await this.tween(dur, k => {
+      if (!this.active || this.disposed) return;
+      const damp = 1 - k;
+      const sx = Math.sin(k * Math.PI * 10) * intensity * damp;
+      const sy = Math.cos(k * Math.PI * 8) * intensity * 0.7 * damp;
+      camera.position.set(base.x + sx, base.y + sy, base.z - sx * 0.5);
+      camera.lookAt(camTarget);
+    });
+    if (this.active && !this.disposed && this.arenaCamPos) {
+      camera.position.copy(this.arenaCamPos);
+      camera.lookAt(camTarget);
+    }
   }
 
   private async cameraBack(dur: number, focus: THREE.Vector3) {
@@ -522,6 +626,7 @@ export class BattleDirector {
       this.b.setFrustum(fromF + (saved.frustum - fromF) * e);
     });
     this.savedCam = null;
+    this.arenaCamPos = null;
   }
 
   private project(p: THREE.Vector3): { x: number; y: number } {
@@ -724,12 +829,13 @@ export class BattleDirector {
   endTurnClicked() {
     if (!this.ui.inputEnabled || !this.state || this.state.turn !== 'hero') return;
     this.setInput(false);
-    void (async () => {
-      const r = endTurn(this.state!);
+    void this.queue.enqueue(async () => {
+      if (!this.state || this.disposed) return;
+      const r = endTurn(this.state);
       this.state = r.state;
       await this.play(r.events);
       await this.advance();
-    })();
+    });
   }
 
   private setInput(on: boolean) {
@@ -745,9 +851,9 @@ export class BattleDirector {
     this.emit({ inputEnabled: true, selectedId: sel, actionId: null, validTargetIds: [], hoverTargetId: null, state: s });
   }
 
-  private async perform(action: BattleAction) {
+  private perform(action: BattleAction) {
     if (!this.state || !this.ui.inputEnabled) return;
-    let r;
+    let r: ReturnType<typeof applyAction>;
     try {
       r = applyAction(this.state, action);
     } catch (err) {
@@ -756,8 +862,11 @@ export class BattleDirector {
     }
     this.setInput(false);
     this.state = r.state;
-    await this.play(r.events);
-    await this.advance();
+    void this.queue.enqueue(async () => {
+      if (this.disposed) return;
+      await this.play(r.events);
+      await this.advance();
+    });
   }
 
   // ------------------------------------------------------------- flow
@@ -819,6 +928,7 @@ export class BattleDirector {
       switch (ev.type) {
         case 'turn_start':
           this.emit({ state: this.state, banner: { text: ev.side === 'hero' ? `Runde ${ev.round} · Dein Zug` : `Runde ${ev.round} · Gegnerzug`, tone: ev.side } });
+          for (const f of this.fighters.values()) this.playRest(f);
           void this.wait(0.9).then(() => { if (this.ui.banner && !['Sieg!', 'Niederlage'].includes(this.ui.banner.text)) this.emit({ banner: null }); });
           await this.wait(0.35);
           break;
@@ -906,6 +1016,21 @@ export class BattleDirector {
     f.root.rotation.y = Math.atan2(d.x * sgn, d.z * sgn);
   }
 
+  private faceTarget(f: Fighter, targetId?: string) {
+    const t = targetId ? this.fighters.get(targetId) : undefined;
+    if (!t || t === f) {
+      this.faceEnemy(f);
+      return;
+    }
+    const dx = t.root.position.x - f.root.position.x;
+    const dz = t.root.position.z - f.root.position.z;
+    if (Math.hypot(dx, dz) > 0.05) {
+      f.root.rotation.y = Math.atan2(dx, dz);
+    } else {
+      this.faceEnemy(f);
+    }
+  }
+
   private async moveTo(f: Fighter, to: THREE.Vector3, speed: number, maxDur: number) {
     const from = f.root.position.clone();
     const dx = to.x - from.x;
@@ -914,9 +1039,10 @@ export class BattleDirector {
     if (dist < 0.02) return;
     f.root.rotation.y = Math.atan2(dx, dz);
     const anim = f.anim();
-    const hasRun = anim.play('run') > 0;
-    if (f.isLeader) this.leaderMoving = true;
     const dur = Math.max(0.15, Math.min(maxDur, dist / speed));
+    const effectiveSpeed = dist / dur;
+    const hasRun = anim.play('run', { timeScale: anim.runTimeScale(effectiveSpeed) }) > 0;
+    if (f.isLeader) this.leaderMoving = true;
     await this.tween(dur, k => {
       f.root.position.x = from.x + dx * k;
       f.root.position.z = from.z + dz * k;
@@ -932,34 +1058,48 @@ export class BattleDirector {
   }
 
   private playRest(f: Fighter) {
-    const st = this.statusOf(f.id);
-    if (st === 'defeated') return;
+    const c = this.state ? getCombatant(this.state, f.id) : undefined;
+    if (c?.status === 'defeated') return;
     const anim = f.anim();
-    if (st === 'dizzy') {
+    if (c?.status === 'dizzy') {
       if (!anim.play('dizzy')) anim.play('idle', { timeScale: 0.5 });
-    } else {
-      anim.play('idle');
+      return;
     }
+    if (c && c.damageFactor < 1) {
+      if (!anim.play('block') && !anim.play('combat_idle')) anim.play('idle');
+      return;
+    }
+    if (!anim.play('combat_idle')) anim.play('idle');
   }
 
-  private async lunge(f: Fighter, dist: number, dur: number) {
+  /** Procedural lunge fallback (0.4 m forward & back with slight forward lean, section 13.5). */
+  private async proceduralLunge(
+    f: Fighter,
+    dist: number,
+    dur: number,
+    tilt: number,
+    onImpact: () => Promise<void>
+  ) {
     const dir = new THREE.Vector3(Math.sin(f.root.rotation.y), 0, Math.cos(f.root.rotation.y));
     const from = f.root.position.clone();
+    let hitDone = false;
+    let hitPromise: Promise<void> | null = null;
     await this.tween(dur, k => {
       const o = Math.sin(k * Math.PI) * dist;
       f.root.position.set(from.x + dir.x * o, from.y, from.z + dir.z * o);
+      f.root.rotation.x = Math.sin(k * Math.PI) * tilt;
+      if (!hitDone && k >= 0.5) {
+        hitDone = true;
+        hitPromise = onImpact().catch(err => console.warn('[battle] fallback onImpact failed:', err));
+      }
     });
-  }
-
-  private playClip(f: Fighter, kind: ClipKind, fallbacks: Array<{ kind: ClipKind; timeScale?: number }> = []): number {
-    const anim = f.anim();
-    const d = anim.play(kind, { once: true });
-    if (d > 0) return d;
-    for (const fb of fallbacks) {
-      const d2 = anim.play(fb.kind, { once: true, timeScale: fb.timeScale });
-      if (d2 > 0) return d2;
+    f.root.position.copy(from);
+    f.root.rotation.x = 0;
+    if (!hitDone) {
+      await onImpact();
+    } else if (hitPromise) {
+      await hitPromise;
     }
-    return 0;
   }
 
   private async choreograph(ev: Extract<BattleEvent, { type: 'action' }>, effects: BattleEvent[]) {
@@ -971,60 +1111,109 @@ export class BattleDirector {
       return;
     }
     const ab = ev.abilityId ? getAbility(ev.abilityId) : undefined;
-    const firstTarget = ev.targetIds[0] ? getCombatant(s, ev.targetIds[0]) : undefined;
-    const offensive = ev.actionId === 'normal_hit' || ev.actionId === 'heavy_hit' || (!!ab && !!firstTarget && firstTarget.side !== actorC.side);
+    const anim = actor.anim();
 
+    // 1. Block (section 13.3 + 13.5): stay in blocking loop until block ends
     if (ev.actionId === 'block') {
-      this.playClip(actor, 'block');
+      anim.play('block');
       this.burst(actor.root.position, 0x38bdf8, 1, 0.45, 1.1);
       this.floater(actor, 'Block', 'block');
-      await this.wait(0.45);
+      await this.wait(0.42);
       await this.applyEffects(effects, actor);
       this.playRest(actor);
       return;
     }
 
-    if (!offensive) {
-      // Support ability on allies: cast in place
-      const d = this.playClip(actor, 'cast', [{ kind: 'attack' }]);
-      this.burst(actor.root.position, 0x86efac, 0.9, 0.5, 1.3);
-      await this.wait(d > 0 ? Math.min(0.5, d * 0.5) : 0.35);
-      await this.applyEffects(effects, actor);
-      await this.wait(0.35);
+    // 2. Ability (per-ability clip + impactTime + configurable melee/ranged approach)
+    if (ev.actionId === 'ability') {
+      const firstTargetId = ev.targetIds[0];
+      const firstTargetC = firstTargetId ? getCombatant(s, firstTargetId) : undefined;
+      const isOffensive = !!firstTargetC && firstTargetC.side !== actorC.side;
+      const approach = isOffensive ? anim.getAbilityApproach(ev.abilityId) : 'ranged';
+      const lanes = ev.targetIds.map(id => getCombatant(s, id)?.pos.lane ?? 1);
+      const lane = lanes.length === 1 ? lanes[0] : 1;
+
+      if (approach === 'melee') {
+        await this.moveTo(actor, this.edgePoint(actor.side, lane), 8, 0.45);
+      }
+      if (firstTargetId && firstTargetId !== actor.id) {
+        this.faceTarget(actor, firstTargetId);
+      } else {
+        this.faceEnemy(actor);
+      }
+      this.burst(actor.root.position, isOffensive ? 0xc084fc : 0x86efac, 1.0, 0.5, 1.35);
+
+      const onCastImpact = async () => {
+        if (isOffensive) {
+          for (const id of ev.targetIds) {
+            const tf = this.fighters.get(id);
+            if (tf) this.burst(tf.root.position, 0xc084fc, 1.25, 0.45, 1.1);
+          }
+        }
+        await this.applyEffects(effects, actor);
+      };
+
+      const res = await anim.playAbilityOnceAndWait(ev.abilityId, {
+        onImpact: onCastImpact,
+      });
+      if (!res.played) {
+        if (approach === 'melee') {
+          await this.proceduralLunge(actor, 0.45, 0.4, 0.18, onCastImpact);
+        } else {
+          // Idle + glow particles fallback (section 13.5)
+          await this.wait(0.32);
+          await onCastImpact();
+          await this.wait(0.3);
+        }
+      }
+      if (approach === 'melee') {
+        await this.moveTo(actor, actor.home, 8, 0.45);
+      }
+      this.faceEnemy(actor);
       this.playRest(actor);
       return;
     }
 
-    // Offensive: run to the edge of the own chunk on the lane of the target
+    // 3. Melee Attack (normal_hit / heavy_hit, section 13.4): run to chunk edge on target's lane
     const lanes = ev.targetIds.map(id => getCombatant(s, id)?.pos.lane ?? 1);
     const lane = lanes.length === 1 ? lanes[0] : 1;
+    const isHeavy = ev.actionId === 'heavy_hit';
+
     await this.moveTo(actor, this.edgePoint(actor.side, lane), 8, 0.45);
-    this.faceEnemy(actor);
-    let dur = 0;
-    if (ev.actionId === 'normal_hit') dur = this.playClip(actor, 'attack');
-    else if (ev.actionId === 'heavy_hit') dur = this.playClip(actor, 'attack_heavy', [{ kind: 'attack', timeScale: 0.8 }]);
-    else dur = this.playClip(actor, 'cast', [{ kind: 'attack' }]);
-    if (ab) this.burst(actor.root.position, 0xc084fc, 1, 0.5, 1.4);
-    let impact: number;
-    if (dur > 0) {
-      impact = Math.min(0.55, dur * 0.45);
-      await this.wait(impact);
-    } else {
-      impact = 0.18;
-      void this.lunge(actor, ev.actionId === 'heavy_hit' ? 0.75 : 0.5, ev.actionId === 'heavy_hit' ? 0.5 : 0.36);
-      await this.wait(ev.actionId === 'heavy_hit' ? 0.25 : impact);
-    }
-    if (ev.actionId === 'heavy_hit') {
-      for (const id of ev.targetIds) {
-        const t = this.fighters.get(id);
-        if (t) this.burst(t.root.position, 0xfb923c, 1.6, 0.5, 1.2);
+    this.faceTarget(actor, ev.targetIds[0]);
+
+    const onAttackImpact = async () => {
+      if (isHeavy) {
+        for (const id of ev.targetIds) {
+          const tf = this.fighters.get(id);
+          if (tf) this.burst(tf.root.position, 0xfb923c, 1.6, 0.5, 1.2);
+        }
+        void this.shakeCamera(0.22, 0.22);
       }
+      await this.applyEffects(effects, actor);
+    };
+
+    const res = isHeavy
+      ? await anim.playOnceAndWait('attack_heavy', {
+          fallbackKeys: [{ key: 'attack', timeScale: 0.8 }],
+          onImpact: onAttackImpact,
+        })
+      : await anim.playOnceAndWait('attack', { onImpact: onAttackImpact });
+
+    if (!res.played) {
+      await this.proceduralLunge(
+        actor,
+        isHeavy ? 0.55 : 0.4,
+        isHeavy ? 0.48 : 0.36,
+        isHeavy ? 0.22 : 0.16,
+        onAttackImpact
+      );
     }
-    await this.applyEffects(effects, actor);
-    await this.wait(Math.max(0.3, Math.min(0.8, dur - impact)));
+
     await this.moveTo(actor, actor.home, 8, 0.45);
     this.faceEnemy(actor);
     this.playRest(actor);
+    void ab;
   }
 
   private async applyEffects(effects: BattleEvent[], actor: Fighter | null) {
@@ -1058,7 +1247,10 @@ export class BattleDirector {
         }
         case 'block': {
           const t = this.fighters.get(e.targetId);
-          if (t && t !== actor) this.floater(t, 'Geschützt', 'block');
+          if (t && t !== actor) {
+            this.floater(t, 'Geschützt', 'block');
+            this.playRest(t);
+          }
           break;
         }
         case 'buff': {
@@ -1083,18 +1275,30 @@ export class BattleDirector {
   private hitReaction(t: Fighter) {
     const st = this.statusOf(t.id);
     if (st === 'defeated') return;
-    const d = st === 'active' ? t.anim().play('hit', { once: true }) : 0;
-    if (d > 0) {
-      void this.wait(Math.min(d, 0.7)).then(() => this.playRest(t));
-    } else {
-      const from = t.root.position.clone();
-      void this.tween(0.28, k => {
-        const o = Math.sin(k * Math.PI * 6) * 0.08 * (1 - k);
-        t.root.position.x = from.x + o;
-        t.root.position.z = from.z - o;
-      }).then(() => { t.root.position.x = from.x; t.root.position.z = from.z; });
-    }
     this.flash(t.root.position, 0xff2222);
+
+    if (st === 'active' && t.anim().has('hit')) {
+      void t.anim().playOnceAndWait('hit').then(() => {
+        if (this.active && !this.disposed) this.playRest(t);
+      });
+      return;
+    }
+
+    // Procedural hit fallback (section 13.5): 0.15 s kickback wobble + red emissive flash
+    const from = t.root.position.clone();
+    const backX = -Math.sin(t.root.rotation.y);
+    const backZ = -Math.cos(t.root.rotation.y);
+    void this.tween(0.16, k => {
+      const kick = Math.sin(k * Math.PI) * 0.16;
+      const shake = Math.sin(k * Math.PI * 5) * 0.04 * (1 - k);
+      t.root.position.x = from.x + backX * kick + shake;
+      t.root.position.z = from.z + backZ * kick;
+      setObjectRedEmissive(t.root, 0.85 * (1 - k));
+    }).then(() => {
+      t.root.position.x = from.x;
+      t.root.position.z = from.z;
+      setObjectRedEmissive(t.root, 0);
+    });
   }
 
   private syncStatusVisuals() {
@@ -1111,15 +1315,31 @@ export class BattleDirector {
       if (c.status === 'defeated') {
         f.shield.visible = false;
         f.stars.visible = false;
-        const d = f.anim().play('defeat', { once: true });
         const baseY = f.baseY;
-        void this.wait(d > 0 ? Math.min(d, 1.2) : 0.1)
-          .then(() => this.tween(0.8, k => { f.root.position.y = baseY - 2.3 * ease(k); }))
-          .then(() => { if (this.statusOf(f.id) === 'defeated') f.root.visible = false; });
+        const anim = f.anim();
+        if (anim.has('defeat')) {
+          void (async () => {
+            await anim.playOnceAndWait('defeat', { clampWhenFinished: true });
+            await this.wait(1.0);
+            await this.tween(0.8, k => setObjectOpacity(f.root, 1 - ease(k)));
+            if (this.statusOf(f.id) === 'defeated') f.root.visible = false;
+          })();
+        } else {
+          // Section 13.5 fallback: sink 0.5 m and fade out over 0.8 s
+          void this.tween(0.8, k => {
+            const e = ease(k);
+            f.root.position.y = baseY - 0.5 * e;
+            setObjectOpacity(f.root, 1 - e);
+          }).then(() => {
+            if (this.statusOf(f.id) === 'defeated') f.root.visible = false;
+          });
+        }
       } else {
         if (prev === 'defeated') {
           f.root.visible = true;
           f.root.position.y = f.baseY;
+          setObjectOpacity(f.root, 1);
+          setObjectRedEmissive(f.root, 0);
         }
         this.playRest(f);
       }
@@ -1175,16 +1395,20 @@ export class BattleDirector {
       if (f.side !== 'hero') continue;
       f.root.visible = true;
       f.root.position.y = f.baseY;
+      f.root.rotation.x = 0;
+      setObjectOpacity(f.root, 1);
+      setObjectRedEmissive(f.root, 0);
       f.anim().play('idle');
     }
   }
 
   private cleanupScene() {
     for (const f of this.fighters.values()) {
+      f.anim().cancelPending();
+      if (!f.persistentAnimator) f.anim().dispose();
       this.fx.remove(f.stars, f.shield);
       f.stars.traverse((o: any) => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
-      f.shield.geometry.dispose();
-      (f.shield.material as THREE.Material).dispose();
+      f.shield.traverse((o: any) => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
       if (f.temp) this.b.scene.remove(f.root);
     }
     for (const h of this.hidden) h.visible = true;
@@ -1209,7 +1433,24 @@ export class BattleDirector {
     const party = this.b.party();
     if (outcome === 'victory') {
       this.emit({ banner: { text: 'Sieg!', tone: 'victory' } });
-      await this.wait(1.2);
+
+      // Section 13.3/13.4: active heroes celebrate with `victory` clip, then return to `idle`
+      const celebrationWaits: Promise<unknown>[] = [this.wait(1.2)];
+      for (const c of s.combatants) {
+        if (c.side !== 'hero' || c.status !== 'active') continue;
+        const f = this.fighters.get(c.id);
+        if (!f) continue;
+        const anim = f.anim();
+        if (anim.has('victory')) {
+          celebrationWaits.push(
+            anim.playOnceAndWait('victory').then(() => {
+              if (this.active && !this.disposed) anim.play('idle');
+            })
+          );
+        }
+      }
+      await Promise.all(celebrationWaits);
+
       const patch: EnemyStateMap = {};
       for (const [pid, v] of Object.entries(enemyPersistence(s))) patch[`${did}:${pid}`] = { kraft: v.kraft, defeated: true };
       this.b.persistEnemyState(patch);
@@ -1235,7 +1476,9 @@ export class BattleDirector {
         if (f.side !== 'enemy' || !f.origin) continue;
         const defeated = this.statusOf(f.id) === 'defeated';
         f.root.position.set(f.origin.x, f.baseY, f.origin.z);
-        f.root.rotation.y = f.origin.rotY;
+        f.root.rotation.set(0, f.origin.rotY, 0);
+        setObjectOpacity(f.root, 1);
+        setObjectRedEmissive(f.root, 0);
         f.root.visible = !defeated && !f.temp;
         f.anim().play('idle');
       }

@@ -59,13 +59,19 @@ self.onmessage = async (ev: MessageEvent<GlbWorkerRequest>) => {
       });
 
     const doc = await io.readBinary(new Uint8Array(buffer));
+    const initialTriangles = countDocumentTriangles(doc);
     const originalClipNames = doc
       .getRoot()
       .listAnimations()
       .map((anim) => anim.getName());
 
-    // Geometry & animation cleanup without altering skeleton/rigging or clip names
-    await doc.transform(dedup(), prune(), resample(), weld());
+    // Geometry & animation cleanup without altering skeleton/rigging or clip names.
+    // Skip weld() on extreme high-poly meshes (> 100k tris) where vertex welding stalls.
+    const cleanupTransforms = [dedup(), prune(), resample()];
+    if (initialTriangles <= 100_000) {
+      cleanupTransforms.push(weld());
+    }
+    await doc.transform(...cleanupTransforms);
 
     // Browser-native texture compression to WebP using createImageBitmap + OffscreenCanvas
     let maxTextureResolution = 0;

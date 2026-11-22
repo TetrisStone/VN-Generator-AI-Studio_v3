@@ -21,6 +21,7 @@ import { compressImage, ImagePreset } from '../utils/compressImage';
 import { optimizeGlbBlob, GlbOptimizationReport, formatBytes } from '../utils/optimizeGlb';
 import { useAssetUrl } from './ui/useAssetUrl';
 import { getItem } from '../utils/db';
+import { CharacterModel3dAnimations } from './battle/CharacterModel3dAnimations';
 
 // Keys of the raw 3D dungeon sandbox (DungeonTestView) in the keyval store
 const DUNGEON_SANDBOX_KEYS = {
@@ -1160,7 +1161,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                                         });
                                         const newId = `model3d_${crypto.randomUUID()}`;
                                         await saveAsset(newId, blob, { kind: 'model', mime: 'model/gltf-binary' });
-                                        onChange({ model3dSrc: newId });
+                                        onChange({ model3dSrc: newId, model3dClips: undefined, model3dImpactTimes: undefined, model3dAbilityAnims: undefined });
                                         setGlbReport(report);
                                     } catch (err) {
                                         console.error("GLB upload error in Character editor:", err);
@@ -1172,7 +1173,7 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                         </label>
                         {character.model3dSrc && (
                             <button
-                                onClick={() => onChange({ model3dSrc: null })}
+                                onClick={() => onChange({ model3dSrc: null, model3dClips: undefined, model3dImpactTimes: undefined, model3dAbilityAnims: undefined })}
                                 className="p-2 bg-red-900/40 hover:bg-red-800 text-red-300 hover:text-white rounded-xl border border-red-700/50 transition-colors"
                                 title="GLB-Modell entfernen"
                             >
@@ -1228,6 +1229,10 @@ const CharacterEditor: React.FC<CharacterEditorProps> = ({ character, assets, on
                             </div>
                         )}
                     </div>
+                )}
+
+                {character.model3dSrc && (
+                    <CharacterModel3dAnimations character={character} onChange={onChange} />
                 )}
             </div>
 

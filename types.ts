@@ -56,6 +56,25 @@ export interface BattleStats {
   abilityId?: string;
 }
 
+export type BattleClipKey =
+  | 'idle'
+  | 'combat_idle'
+  | 'run'
+  | 'attack'
+  | 'attack_heavy'
+  | 'block'
+  | 'cast'
+  | 'hit'
+  | 'dizzy'
+  | 'defeat'
+  | 'victory';
+
+export interface AbilityAnimConfig {
+  clip?: string;
+  impactTime?: number;
+  approach?: 'melee' | 'ranged';
+}
+
 export interface CharacterImagePrompts {
     trigger?: string;      // z.B. "lstsprk_elr_bs" (LoRA-Triggerwort)
     face?: string;         // z.B. "red_hair, long_hair, blue_eyes"
@@ -113,6 +132,9 @@ export interface Character {
   model3dScale?: number;
   model3dOffsetY?: number;
   model3dRotationY?: number;
+  model3dClips?: Partial<Record<BattleClipKey, string>>;
+  model3dImpactTimes?: Partial<Record<BattleClipKey, number>>;
+  model3dAbilityAnims?: Record<string, AbilityAnimConfig>;
 }
 
 export interface Scene {
@@ -368,6 +390,9 @@ export interface DungeonNpcLibraryEntry {
   fileSize: number;
   assetId?: string;
   dataBase64?: string; // Legacy Data URL fallback
+  model3dClips?: Partial<Record<BattleClipKey, string>>;
+  model3dImpactTimes?: Partial<Record<BattleClipKey, number>>;
+  model3dAbilityAnims?: Record<string, AbilityAnimConfig>;
 }
 
 /** One placed character standing on a walkable sub-tile */
@@ -399,6 +424,11 @@ export interface DungeonBaseGLB {
   offsetZ?: number;
   rotationY?: number;
   useRawScale?: boolean; // character only
+  idleClipName?: string; // character only
+  runClipName?: string;  // character only
+  model3dClips?: Partial<Record<BattleClipKey, string>>;
+  model3dImpactTimes?: Partial<Record<BattleClipKey, number>>;
+  model3dAbilityAnims?: Record<string, AbilityAnimConfig>;
   showLeftWall?: boolean; // wall/door layout toggles
   showUpperWall?: boolean;
   showLeftDoor?: boolean;

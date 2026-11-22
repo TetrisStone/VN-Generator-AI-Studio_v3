@@ -1,102 +1,17 @@
 // Figure helpers for the battle scene and the marching party:
-// clip lookup with fallbacks (section 13), procedural stand-in figures and the
-// follower chain that walks behind the leader on its breadcrumb trail.
+// battle animation resolution (section 13), procedural stand-in figures and
+// the follower chain that walks behind the leader on its breadcrumb trail.
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Character } from '../../types';
 import { createGLTFLoader, loadGlbArrayBuffer } from '../../utils/gltfLoader';
+import { BattleAnimator, ensureUniqueMaterials, stripRootMotion } from '../../battle/animation';
 import { resolveHeroStats, resolveSparkStats } from '../../battle/stats';
 import type { ResolvedStats } from '../../battle/types';
 import type { Tile } from '../../battle/detection';
 import { BREADCRUMB_LENGTH } from '../../battle/config';
 
-// ---------------------------------------------------------------------------
-// Animator: finds clips by name; returns 0 when a clip is missing so the
-// caller can run the procedural fallback. Never throws.
-// ---------------------------------------------------------------------------
-export type ClipKind = 'idle' | 'run' | 'attack' | 'attack_heavy' | 'block' | 'cast' | 'hit' | 'dizzy' | 'defeat';
-
-const CLIP_PATTERNS: Record<ClipKind, RegExp> = {
-  idle: /idle|stand|wait|pose/i,
-  run: /run|walk|jog|move/i,
-  attack: /attack|slash|strike|swing|punch/i,
-  attack_heavy: /attack[_ ]?heavy|heavy|power/i,
-  block: /block|guard|defend|shield/i,
-  cast: /cast|spell|magic|skill/i,
-  hit: /^hit$|hit[_ ]?react|hurt|damage|impact|^hit[_ ]/i,
-  dizzy: /dizzy|stun|daze/i,
-  defeat: /defeat|death|die|dead/i,
-};
-
-export class Animator {
-  mixer: THREE.AnimationMixer | null;
-  clips: THREE.AnimationClip[];
-  current: THREE.AnimationAction | null;
-  private names: Partial<Record<ClipKind, string>>;
-  private onChange?: (a: THREE.AnimationAction | null) => void;
-
-  constructor(
-    mixer: THREE.AnimationMixer | null,
-    clips: THREE.AnimationClip[],
-    opts: { idle?: string; run?: string; current?: THREE.AnimationAction | null; onChange?: (a: THREE.AnimationAction | null) => void } = {}
-  ) {
-    this.mixer = mixer;
-    this.clips = clips;
-    this.current = opts.current ?? null;
-    this.names = { idle: opts.idle, run: opts.run };
-    this.onChange = opts.onChange;
-  }
-
-  find(kind: ClipKind): THREE.AnimationClip | undefined {
-    const named = this.names[kind];
-    if (named) {
-      const c = this.clips.find(x => x.name === named);
-      if (c) return c;
-    }
-    const exact = this.clips.find(c => c.name.toLowerCase() === kind);
-    if (exact) return exact;
-    const re = CLIP_PATTERNS[kind];
-    return this.clips.find(c => {
-      if (!re.test(c.name)) return false;
-      if (kind === 'attack' && /heavy|power/i.test(c.name)) return false;
-      if (kind === 'hit' && /attack/i.test(c.name)) return false;
-      return true;
-    });
-  }
-
-  has(kind: ClipKind): boolean {
-    return !!this.mixer && !!this.find(kind);
-  }
-
-  /** Plays a clip. Returns its duration (s, after time scale) or 0 if unavailable. */
-  play(kind: ClipKind, opts: { once?: boolean; timeScale?: number; fade?: number } = {}): number {
-    try {
-      if (!this.mixer) return 0;
-      const clip = this.find(kind);
-      if (!clip) return 0;
-      const action = this.mixer.clipAction(clip);
-      const fade = opts.fade ?? 0.15;
-      action.reset();
-      action.setEffectiveTimeScale(opts.timeScale ?? 1);
-      action.setEffectiveWeight(1);
-      if (opts.once) {
-        action.setLoop(THREE.LoopOnce, 1);
-        action.clampWhenFinished = true;
-      } else {
-        action.setLoop(THREE.LoopRepeat, Infinity);
-        action.clampWhenFinished = false;
-      }
-      if (this.current && this.current !== action) this.current.fadeOut(fade);
-      action.fadeIn(fade).play();
-      this.current = action;
-      this.onChange?.(action);
-      return clip.duration / Math.max(0.01, opts.timeScale ?? 1);
-    } catch (err) {
-      console.warn('[battle] animation failed:', err);
-      return 0;
-    }
-  }
-}
+export { BattleAnimator as Animator, type BattleClipKey as ClipKind } from '../../battle/animation';
 
 // ---------------------------------------------------------------------------
 // Roster: 3 heroes + Spark. Derived from the project characters because the
@@ -183,36 +98,63 @@ export interface PartyFigure {
   root: THREE.Group;
   /** Holder of the visible model (procedural bob / sink happens here) */
   inner: THREE.Group;
-  animator: Animator;
+  animator: BattleAnimator;
   tile: Tile;
   target: THREE.Vector3 | null;
   moving: boolean;
 }
 
-function buildFigure(entry: RosterEntry, glb: { scene: THREE.Group; animations: THREE.AnimationClip[] } | null, surfaceY: number): PartyFigure {
+function buildFigure(
+  entry: RosterEntry,
+  glb: { scene: THREE.Group; animations: THREE.AnimationClip[] } | null,
+  surfaceY: number,
+  character?: Character
+): PartyFigure {
   const root = new THREE.Group();
   root.name = `Party_${entry.id}`;
   const inner = new THREE.Group();
-  let animator = new Animator(null, []);
+  let animator = new BattleAnimator(null, [], { characterName: entry.name });
   if (glb) {
     const model = cloneSkeleton(glb.scene) as THREE.Group;
     model.traverse((o: any) => {
       if (o.isMesh) {
         o.frustumCulled = false;
         const mats = Array.isArray(o.material) ? o.material : [o.material];
-        mats.forEach((m: any) => { if (m?.map) m.map.colorSpace = THREE.SRGBColorSpace; });
+        mats.forEach((m: any) => {
+          if (m?.map) {
+            m.map.colorSpace = THREE.SRGBColorSpace;
+            m.map.needsUpdate = true;
+          }
+        });
       }
     });
+    ensureUniqueMaterials(model);
+
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     model.position.set(-center.x, -box.min.y, -center.z);
+
+    const baseScale = size.y > 0.001 ? (entry.isSpark ? 1.2 : 1.85) / size.y : 1;
+    const userScale = character?.model3dScale ?? 1.0;
+    const userOffsetY = character?.model3dOffsetY ?? 0.0;
+    const userRotY = ((character?.model3dRotationY ?? 0) * Math.PI) / 180;
+
     const scaler = new THREE.Group();
     scaler.add(model);
-    scaler.scale.setScalar(size.y > 0.001 ? (entry.isSpark ? 1.2 : 1.85) / size.y : 1);
+    scaler.scale.setScalar(baseScale * userScale);
+    scaler.position.set(0, userOffsetY, 0);
+    scaler.rotation.y = userRotY;
     inner.add(scaler);
-    if (glb.animations.length > 0) {
-      animator = new Animator(new THREE.AnimationMixer(model), glb.animations);
+
+    const cleanClips = stripRootMotion(glb.animations, model);
+    if (cleanClips.length > 0) {
+      animator = new BattleAnimator(new THREE.AnimationMixer(model), cleanClips, {
+        characterName: entry.name,
+        model3dClips: character?.model3dClips,
+        model3dImpactTimes: character?.model3dImpactTimes,
+        model3dAbilityAnims: character?.model3dAbilityAnims,
+      });
       animator.play('idle');
     }
   } else {
@@ -268,9 +210,11 @@ export class Party {
   private async loadModels(characters: Character[]) {
     for (let k = 0; k < this.followers.length; k++) {
       const f = this.followers[k];
-      const glb = await loadCharacterGlb(characters.find(c => c.id === f.entry.characterId));
+      const char = characters.find(c => c.id === f.entry.characterId);
+      const glb = await loadCharacterGlb(char);
       if (!glb || this.disposed) continue;
-      const nf = buildFigure(f.entry, glb, this.surfaceY());
+      f.animator.dispose();
+      const nf = buildFigure(f.entry, glb, this.surfaceY(), char);
       nf.tile = f.tile;
       nf.root.position.copy(f.root.position);
       nf.root.rotation.y = f.root.rotation.y;
@@ -283,6 +227,7 @@ export class Party {
 
   dispose() {
     this.disposed = true;
+    for (const f of this.followers) f.animator.dispose();
     this.scene.remove(this.group);
   }
 
@@ -401,10 +346,11 @@ export class Party {
       const dx = f.target.x - pos.x;
       const dz = f.target.z - pos.z;
       const dist = Math.hypot(dx, dz);
-      const step = this.rush ? Math.max(speed * 6, dist / 0.15) * delta : speed * 1.15 * delta;
+      const stepSpeed = this.rush ? Math.max(speed * 6, dist / 0.15) : speed * 1.15;
+      const step = stepSpeed * delta;
       if (!f.moving) {
         f.moving = true;
-        f.animator.play('run');
+        f.animator.play('run', { timeScale: f.animator.runTimeScale(stepSpeed) });
       }
       if (dist > 0.001) f.root.rotation.y = Math.atan2(dx, dz);
       if (dist <= step) {
