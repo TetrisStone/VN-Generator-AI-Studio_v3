@@ -32,6 +32,84 @@ export const LOOPING_CLIP_KEYS = new Set<BattleClipKey>([
 export const DEFAULT_IMPACT_TIME = 0.5;
 export const CROSSFADE_SECONDS = 0.18;
 
+/**
+ * Standardized node-name prefixes inside GLBs so combat equipment (e.g. a sword
+ * parented to `mixamorig:RightHand`) toggles visibility automatically:
+ * - `battle_weapon_*` / `weapon_battle_*` / `BattleWeapon*`: visible ONLY in battle
+ * - `explore_weapon_*` / `weapon_explore_*` / `sheathed_weapon_*`: visible ONLY outside battle
+ */
+export const BATTLE_WEAPON_RE = /^(battle_weapon|weapon_battle|battleweapon)/i;
+export const EXPLORE_WEAPON_RE = /^(explore_weapon|weapon_explore|sheathed_weapon|sheathedweapon)/i;
+
+export function isCombatClipKey(key: BattleClipKey): boolean {
+  return key !== 'idle' && key !== 'run';
+}
+
+/**
+ * Toggles visibility of attached weapon/prop subtrees matching the standardized naming
+ * convention. Returns `true` if at least one matching weapon node was found.
+ */
+export function setBattleWeaponsVisible(
+  root: THREE.Object3D | null | undefined,
+  inBattle: boolean
+): boolean {
+  if (!root) return false;
+  let found = false;
+  root.traverse((obj) => {
+    const name = obj.name || '';
+    if (!name) return;
+    if (BATTLE_WEAPON_RE.test(name)) {
+      obj.visible = inBattle;
+      found = true;
+    } else if (EXPLORE_WEAPON_RE.test(name)) {
+      obj.visible = !inBattle;
+      found = true;
+    }
+  });
+  return found;
+}
+
+/**
+ * Computes a character's resting bounding box while excluding attached weapon/prop
+ * subtrees (`battle_weapon_*`, `explore_weapon_*`, etc.) so a long sword hanging below
+ * the feet in T-pose never lifts the character off the floor or distorts height scaling.
+ */
+export function computeCharacterBounds(root: THREE.Object3D): THREE.Box3 {
+  root.updateWorldMatrix(true, true);
+  const box = new THREE.Box3();
+  const isWeaponNode = (obj: THREE.Object3D): boolean => {
+    let cur: THREE.Object3D | null = obj;
+    while (cur && cur !== root) {
+      const name = cur.name || '';
+      if (name && (BATTLE_WEAPON_RE.test(name) || EXPLORE_WEAPON_RE.test(name))) {
+        return true;
+      }
+      cur = cur.parent;
+    }
+    return false;
+  };
+  const meshBox = new THREE.Box3();
+  root.traverse((obj: any) => {
+    if (!obj.isMesh || !obj.geometry || isWeaponNode(obj)) return;
+    if (obj.boundingBox !== undefined) {
+      // Object-level bounding box (e.g. SkinnedMesh: applies skeleton & meshopt dequantization)
+      if (obj.boundingBox === null) obj.computeBoundingBox();
+      if (!obj.boundingBox) return;
+      meshBox.copy(obj.boundingBox);
+    } else {
+      if (obj.geometry.boundingBox === null) obj.geometry.computeBoundingBox();
+      if (!obj.geometry.boundingBox) return;
+      meshBox.copy(obj.geometry.boundingBox);
+    }
+    meshBox.applyMatrix4(obj.matrixWorld);
+    box.union(meshBox);
+  });
+  if (box.isEmpty()) {
+    box.setFromObject(root);
+  }
+  return box;
+}
+
 export const BATTLE_CLIP_LABELS_DE: Record<BattleClipKey, string> = {
   idle: 'Ruhe – Erkundung (idle)',
   combat_idle: 'Kampf-Ruhe (combat_idle)',

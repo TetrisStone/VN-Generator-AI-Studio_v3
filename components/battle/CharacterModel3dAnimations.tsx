@@ -12,8 +12,11 @@ import {
   LOOPING_CLIP_KEYS,
   autoMapClipNames,
   clampImpactRatio,
+  computeCharacterBounds,
   defaultAbilityApproach,
+  isCombatClipKey,
   resolveImpactTime,
+  setBattleWeaponsVisible,
   stripRootMotion,
 } from '../../battle/animation';
 
@@ -75,6 +78,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const mixerRef = useRef<THREE.AnimationMixer | null>(null);
+  const loadedModelRef = useRef<THREE.Group | null>(null);
   const clipsByNameRef = useRef<Map<string, THREE.AnimationClip>>(new Map());
   const activeActionRef = useRef<THREE.AnimationAction | null>(null);
   const impactTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -82,6 +86,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
   const finishCleanupRef = useRef<(() => void) | null>(null);
 
   const [glbClips, setGlbClips] = useState<Array<{ name: string; duration: number }>>([]);
+  const [hasBattleWeapon, setHasBattleWeapon] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [previewLabel, setPreviewLabel] = useState<string>('idle');
@@ -119,11 +124,14 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
   const playClipPreview = (
     label: string,
     clipName: string | undefined,
-    opts: { looping?: boolean; holdLastFrame?: boolean; impactRatio?: number } = {}
+    opts: { looping?: boolean; holdLastFrame?: boolean; impactRatio?: number; inBattle?: boolean } = {}
   ) => {
     stopPreviewTimers();
     setPreviewLabel(label);
     setImpactFlash(false);
+    if (opts.inBattle !== undefined) {
+      setBattleWeaponsVisible(loadedModelRef.current, opts.inBattle);
+    }
 
     const mixer = mixerRef.current;
     if (!mixer || !clipName) return;
@@ -236,6 +244,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
 
       const model = gltf.scene as THREE.Group;
       loadedModel = model;
+      loadedModelRef.current = model;
       model.traverse((o: any) => {
         if (o.isMesh) {
           o.frustumCulled = false;
@@ -249,7 +258,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
         }
       });
 
-      const box = new THREE.Box3().setFromObject(model);
+      const box = computeCharacterBounds(model);
       const size = box.getSize(new THREE.Vector3());
       const center = box.getCenter(new THREE.Vector3());
       model.position.set(-center.x, -box.min.y, -center.z);
@@ -293,6 +302,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
         stripped.map((c) => c.name),
         { model3dClips: clipsOverride }
       );
+      setHasBattleWeapon(setBattleWeaponsVisible(model, !!initialMap.combat_idle));
       const startClipName = initialMap.combat_idle || initialMap.idle;
       if (startClipName) {
         const startClip = clipsByNameRef.current.get(startClipName);
@@ -342,6 +352,8 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
       removeListeners?.();
       mixerRef.current?.stopAllAction();
       mixerRef.current = null;
+      loadedModelRef.current = null;
+      setHasBattleWeapon(false);
       activeActionRef.current = null;
       clipsByNameRef.current.clear();
       if (loadedModel) disposeSceneResources(loadedModel);
@@ -375,6 +387,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
         looping: LOOPING_CLIP_KEYS.has(key),
         holdLastFrame: key === 'defeat',
         impactRatio: hasImpact ? resolveImpactTime(key, impactTimes) : undefined,
+        inBattle: isCombatClipKey(key),
       });
     }
   };
@@ -436,6 +449,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
                 looping: LOOPING_CLIP_KEYS.has(key),
                 holdLastFrame: key === 'defeat',
                 impactRatio: withImpactSlider ? impactRatio : undefined,
+                inBattle: isCombatClipKey(key),
               })
             }
             className="px-2.5 py-1 rounded bg-cyan-700/80 hover:bg-cyan-600 disabled:bg-gray-800 disabled:text-gray-600 text-white text-xs font-semibold flex items-center gap-1 transition-colors"
@@ -512,9 +526,12 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
               <Zap size={12} /> Treffer!
             </div>
           )}
-          <div className="mt-1.5 flex items-center justify-between text-[11px] text-gray-400 px-1">
+          <div className="mt-1.5 flex items-center justify-between text-[11px] text-gray-400 px-1 gap-2">
             <span className="truncate">Vorschau: <b className="text-cyan-200">{previewLabel}</b></span>
-            <span className="shrink-0 ml-2">{glbClips.length} Clips</span>
+            <span className="shrink-0 flex items-center gap-2">
+              {hasBattleWeapon && <span className="text-amber-300 font-semibold">⚔ Waffe im Kampf</span>}
+              <span>{glbClips.length} Clips</span>
+            </span>
           </div>
         </div>
 
@@ -569,7 +586,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
                         updateAbilityAnim(ab.id, { clip });
                         const target = clip || fallbackClip;
                         if (target) {
-                          playClipPreview(ab.name, target, { impactRatio });
+                          playClipPreview(ab.name, target, { impactRatio, inBattle: true });
                         }
                       }}
                     >
@@ -605,7 +622,7 @@ export const Model3dAnimationEditor: React.FC<Model3dAnimationEditorProps> = ({
                     <button
                       type="button"
                       disabled={!resolvedClip}
-                      onClick={() => playClipPreview(ab.name, resolvedClip, { impactRatio })}
+                      onClick={() => playClipPreview(ab.name, resolvedClip, { impactRatio, inBattle: true })}
                       className="px-2.5 py-1 rounded bg-purple-700/80 hover:bg-purple-600 disabled:bg-gray-800 disabled:text-gray-600 text-white text-xs font-semibold flex items-center gap-1 transition-colors"
                       title={resolvedClip ? `Clip "${resolvedClip}" abspielen` : 'Kein Clip vorhanden'}
                     >

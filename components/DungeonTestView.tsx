@@ -11,7 +11,8 @@ import { AbilityAnimConfig, BattleClipKey, Character, Scene, DungeonProject, Dun
 import { getItem, setItem as setKeyvalItem } from '../utils/db';
 import { Party } from './battle/figures';
 import { Model3dAnimationModal, type AnimationConfigPatch } from './battle/CharacterModel3dAnimations';
-import { BattleAnimator, autoMapClipNames, ensureUniqueMaterials, stripRootMotion } from '../battle/animation';
+import { BattleAnimator, autoMapClipNames, computeCharacterBounds, ensureUniqueMaterials, setBattleWeaponsVisible, stripRootMotion } from '../battle/animation';
+import { resolveLeaderModel } from '../battle/roster';
 import { useBattleScene, type BattleBridge, type EnemyStateMap } from './battle/useBattleScene';
 import { BattleOverlay } from './battle/BattleOverlay';
 import { saveAsset } from '../utils/assetStore';
@@ -55,6 +56,7 @@ const STORAGE_KEY_DOOR_GLB = 'dungeon_custom_door_glb';
 
 interface StoredGLBConfig {
   fileName: string;
+  characterId?: string;
   fileSize: number;
   assetId?: string;
   dataBase64?: string;
@@ -645,12 +647,24 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
 
   // Base chunk/character GLB file data (incl. config) for the project snapshot
   const [baseDataState, setBaseDataState] = useState<{ floor: DungeonBaseGLB | null; wall: DungeonBaseGLB | null; door: DungeonBaseGLB | null; char: DungeonBaseGLB | null }>({ floor: null, wall: null, door: null, char: null });
+  const baseDataStateRef = useRef(baseDataState);
   const baseDataCharRef = useRef<DungeonBaseGLB | null>(null);
+  const userEditedBaseRef = useRef<{ floor: boolean; wall: boolean; door: boolean; char: boolean }>({ floor: false, wall: false, door: false, char: false });
+  const dirtyProjectSaveRef = useRef<boolean>(false);
   useEffect(() => {
+    baseDataStateRef.current = baseDataState;
     baseDataCharRef.current = baseDataState.char;
-  }, [baseDataState.char]);
+  }, [baseDataState]);
   const setBaseData = useCallback((part: 'floor' | 'wall' | 'door' | 'char', data: DungeonBaseGLB | null) => {
-    if (part === 'char') baseDataCharRef.current = data;
+    userEditedBaseRef.current[part] = true;
+    dirtyProjectSaveRef.current = true;
+    baseDataStateRef.current = { ...baseDataStateRef.current, [part]: data };
+    if (part === 'char') {
+      baseDataCharRef.current = data;
+      if (dungeonProjectRef.current) {
+        dungeonProjectRef.current = { ...dungeonProjectRef.current, baseCharacter: data };
+      }
+    }
     setBaseDataState(prev => ({ ...prev, [part]: data }));
   }, []);
 
@@ -798,8 +812,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   const [isLoadingModel, setIsLoadingModel] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('3D-Modell wird geladen...');
 
-  // Character Fine-Tuning state
-  const [useRawCharacterScale, setUseRawCharacterScale] = useState<boolean>(true); // 1:1 Blender scale
+  // Character Fine-Tuning state (normalized to standard 1.85m height by default so leader matches party/NPCs)
+  const [useRawCharacterScale, setUseRawCharacterScale] = useState<boolean>(false);
   const [modelScale, setModelScale] = useState<number>(1.0);
   const [modelOffsetY, setModelOffsetY] = useState<number>(0.0);
   const [modelRotationY, setModelRotationY] = useState<number>(0); // in degrees: 0, 90, 180, 270
@@ -972,25 +986,40 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   useEffect(() => {
     onSaveProjectRef.current = onSaveProject ?? null;
   });
+  const flushProjectSave = useCallback(() => {
+    if (!dungeonProjectRef.current || !onSaveProjectRef.current) return;
+    if (!restoredInitRef.current) return;
+    dirtyProjectSaveRef.current = false;
+    const bd = baseDataStateRef.current;
+    onSaveProjectRef.current({
+      sections: sectionsRef.current.map(s => ({ ...s })),
+      chunkLibrary: chunkLibraryRef.current,
+      placedChunks: placedChunksRef.current,
+      npcLibrary: npcLibraryRef.current,
+      placedNpcs: placedNpcsRef.current,
+      baseFloor: bd.floor,
+      baseWall: bd.wall,
+      baseDoor: bd.door,
+      baseCharacter: bd.char,
+      updatedAt: Date.now()
+    });
+  }, []);
   useEffect(() => {
     if (!dungeonProjectRef.current || !onSaveProjectRef.current) return;
     if (!restoredInitRef.current) return;
+    dirtyProjectSaveRef.current = true;
     const t = setTimeout(() => {
-      onSaveProjectRef.current?.({
-        sections: sectionsRef.current.map(s => ({ ...s })),
-        chunkLibrary: chunkLibraryRef.current,
-        placedChunks: placedChunksRef.current,
-        npcLibrary: npcLibraryRef.current,
-        placedNpcs: placedNpcsRef.current,
-        baseFloor: baseDataState.floor,
-        baseWall: baseDataState.wall,
-        baseDoor: baseDataState.door,
-        baseCharacter: baseDataState.char,
-        updatedAt: Date.now()
-      });
+      flushProjectSave();
     }, 800);
     return () => clearTimeout(t);
-  }, [chunkLibrary, placedChunks, npcLibrary, placedNpcs, sections, baseDataState]);
+  }, [chunkLibrary, placedChunks, npcLibrary, placedNpcs, sections, baseDataState, flushProjectSave]);
+  useEffect(() => {
+    return () => {
+      if (dirtyProjectSaveRef.current) {
+        flushProjectSave();
+      }
+    };
+  }, [flushProjectSave]);
 
   // Camera look-at target, mutable outside the mount effect (section teleport)
   const camTargetRef = useRef<THREE.Vector3 | null>(null);
@@ -1401,7 +1430,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
   }, [modelOffsetY]);
 
   // Set Character Animation Clip
-  const playAnimationClip = useCallback((clipName: string, fadeDuration: number = 0.25) => {
+  const playAnimationClip = useCallback((clipName: string, fadeDuration: number = 0.25, timeScale: number = 1) => {
     if (!animationMixerRef.current || !clipName) return;
     const clip = gltfClipsMapRef.current.get(clipName);
     if (!clip) return;
@@ -1410,6 +1439,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     const currentAction = activeActionRef.current;
 
     if (currentAction === nextAction) {
+      nextAction.setEffectiveTimeScale(timeScale);
       if (!currentAction.isRunning()) {
         currentAction.reset().play();
       }
@@ -1420,7 +1450,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       currentAction.fadeOut(fadeDuration);
     }
 
-    nextAction.reset().fadeIn(fadeDuration).play();
+    nextAction.reset().setEffectiveTimeScale(timeScale).fadeIn(fadeDuration).play();
     activeActionRef.current = nextAction;
   }, []);
 
@@ -1429,7 +1459,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     if (!animationMixerRef.current) return;
     const clipName = moving ? selectedRunClipRef.current : selectedIdleClipRef.current;
     if (clipName) {
-      playAnimationClip(clipName);
+      playAnimationClip(clipName, 0.25, moving ? moveSpeedRef.current / 3.6 : 1);
     }
   }, [playAnimationClip]);
 
@@ -1472,8 +1502,8 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     });
     ensureUniqueMaterials(model);
 
-    // Compute bounding box and normalize scale & pivot to bottom-center
-    const box = new THREE.Box3().setFromObject(model);
+    // Compute bounding box (excluding attached battle/explore weapons) and normalize scale & pivot to bottom-center
+    const box = computeCharacterBounds(model);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
 
@@ -1517,6 +1547,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     shadowMesh.rotation.x = -Math.PI / 2;
     shadowMesh.position.y = 0.01;
     root.add(shadowMesh);
+    setBattleWeaponsVisible(root, false);
 
     // Apply current position and facing angle
     root.position.copy(characterPosRef.current);
@@ -2364,26 +2395,48 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         return;
       }
       const loader = createGLTFLoader();
-      loader.parse(buffer, '', (gltf) => {
+      loader.parse(buffer, '', async (gltf) => {
+        const nextScale = char.model3dScale ?? 1.0;
+        const nextOffsetY = char.model3dOffsetY ?? 0.0;
+        const nextRotY = char.model3dRotationY ?? 0.0;
         mountGLBModel(gltf, {
           fileName: `${char.name}.glb`,
-          scale: char.model3dScale ?? 1.0,
-          useRawScale: useRawCharacterScale,
-          offsetY: char.model3dOffsetY ?? 0.0,
-          rotationY: char.model3dRotationY ?? 0.0,
+          scale: nextScale,
+          useRawScale: false,
+          offsetY: nextOffsetY,
+          rotationY: nextRotY,
+          idleClipName: char.model3dClips?.idle,
+          runClipName: char.model3dClips?.run,
         });
         setCustomModelName(`${char.name}.glb`);
         setCustomModelSize(0);
-        setBaseData('char', {
+        setUseRawCharacterScale(false);
+        setModelScale(nextScale);
+        setModelOffsetY(nextOffsetY);
+        setModelRotationY(nextRotY);
+        const charConfig: DungeonBaseGLB = {
           fileName: `${char.name}.glb`,
+          characterId: char.id,
           ...(char.model3dSrc!.startsWith('data:')
             ? { dataBase64: char.model3dSrc! }
             : { assetId: char.model3dSrc! }),
-          scale: char.model3dScale ?? 1.0,
-          useRawScale: useRawCharacterScale,
-          offsetY: char.model3dOffsetY ?? 0.0,
-          rotationY: char.model3dRotationY ?? 0.0
-        });
+          scale: nextScale,
+          useRawScale: false,
+          offsetY: nextOffsetY,
+          rotationY: nextRotY,
+          idleClipName: char.model3dClips?.idle,
+          runClipName: char.model3dClips?.run,
+          model3dClips: char.model3dClips,
+          model3dImpactTimes: char.model3dImpactTimes,
+          model3dAbilityAnims: char.model3dAbilityAnims,
+        };
+        try {
+          await setItem(STORAGE_KEY_CHAR_GLB, charConfig);
+        } catch (storageErr) {
+          console.warn("Could not save project character GLB to IndexedDB:", storageErr);
+        }
+        setBaseData('char', charConfig);
+        if (restoredInitRef.current) flushProjectSave();
         setIsLoadingModel(false);
       }, (err) => {
         console.error("Failed to parse character GLB:", err);
@@ -2393,7 +2446,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       console.error("Failed to load character GLB:", err);
       setIsLoadingModel(false);
     }
-  }, [mountGLBModel, useRawCharacterScale]);
+  }, [mountGLBModel, useRawCharacterScale, setItem, setBaseData, flushProjectSave]);
 
   // Revert to built-in Anime Knight Dummy
   const handleResetToDummy = useCallback(async () => {
@@ -2421,6 +2474,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     setCustomModelName('');
     setCustomModelSize(0);
     setBaseData('char', null);
+    if (restoredInitRef.current) flushProjectSave();
     setAvailableClips([]);
     setSelectedIdleClip('');
     setSelectedRunClip('');
@@ -3004,28 +3058,79 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     scene.add(hoverGroup);
 
 
-    // Check IndexedDB (or bound project) for previously stored custom Character GLB
+    // Check IndexedDB / bound project / live project character for the playable leader GLB
     const initCharacter = async () => {
       try {
         const storedGLB = await loadDungeonData<StoredGLBConfig>(STORAGE_KEY_CHAR_GLB, 'baseCharacter');
-        const charRef = storedGLB?.assetId || storedGLB?.dataBase64;
-        if (storedGLB && charRef) {
-          const buffer = await loadGlbArrayBuffer(charRef);
+        const resolved = resolveLeaderModel(charactersRef.current, storedGLB as DungeonBaseGLB | null, {
+          playMode: playModeRef.current,
+        });
+        if (resolved) {
+          let activeModel = resolved;
+          let buffer = await loadGlbArrayBuffer(activeModel.assetRef);
+          const fallbackRef = storedGLB?.assetId || storedGLB?.dataBase64;
+          if (!buffer && storedGLB && fallbackRef && fallbackRef !== activeModel.assetRef) {
+            buffer = await loadGlbArrayBuffer(fallbackRef);
+            if (buffer) {
+              activeModel = {
+                assetRef: fallbackRef,
+                fileName: storedGLB.fileName || 'custom_model.glb',
+                fileSize: storedGLB.fileSize,
+                characterId: storedGLB.characterId,
+                fromProjectCharacter: false,
+                scale: storedGLB.scale,
+                useRawScale: storedGLB.useRawScale,
+                offsetY: storedGLB.offsetY,
+                rotationY: storedGLB.rotationY,
+                idleClipName: storedGLB.model3dClips?.idle || storedGLB.idleClipName,
+                runClipName: storedGLB.model3dClips?.run || storedGLB.runClipName,
+                model3dClips: storedGLB.model3dClips,
+                model3dImpactTimes: storedGLB.model3dImpactTimes,
+                model3dAbilityAnims: storedGLB.model3dAbilityAnims,
+              };
+            }
+          }
           if (buffer) {
             const loader = createGLTFLoader();
             loader.parse(buffer, '', (gltf) => {
-              setCustomModelName(storedGLB.fileName || 'custom_model.glb');
-              setCustomModelSize(storedGLB.fileSize || 0);
-              if (storedGLB.scale !== undefined) setModelScale(storedGLB.scale);
-              if (storedGLB.useRawScale !== undefined) setUseRawCharacterScale(storedGLB.useRawScale);
-              if (storedGLB.offsetY !== undefined) setModelOffsetY(storedGLB.offsetY);
-              if (storedGLB.rotationY !== undefined) setModelRotationY(storedGLB.rotationY);
-              if (!isProjectModeRef.current) setBaseData('char', storedGLB as DungeonBaseGLB);
+              setCustomModelName(activeModel.fileName || 'custom_model.glb');
+              setCustomModelSize(activeModel.fileSize || 0);
+              if (activeModel.scale !== undefined) setModelScale(activeModel.scale);
+              if (activeModel.useRawScale !== undefined) setUseRawCharacterScale(activeModel.useRawScale);
+              if (activeModel.offsetY !== undefined) setModelOffsetY(activeModel.offsetY);
+              if (activeModel.rotationY !== undefined) setModelRotationY(activeModel.rotationY);
+
+              const liveConfig: DungeonBaseGLB = {
+                fileName: activeModel.fileName,
+                fileSize: activeModel.fileSize,
+                characterId: activeModel.characterId,
+                ...(activeModel.assetRef.startsWith('data:')
+                  ? { dataBase64: activeModel.assetRef }
+                  : { assetId: activeModel.assetRef }),
+                scale: activeModel.scale,
+                useRawScale: activeModel.useRawScale,
+                offsetY: activeModel.offsetY,
+                rotationY: activeModel.rotationY,
+                idleClipName: activeModel.idleClipName,
+                runClipName: activeModel.runClipName,
+                model3dClips: activeModel.model3dClips,
+                model3dImpactTimes: activeModel.model3dImpactTimes,
+                model3dAbilityAnims: activeModel.model3dAbilityAnims,
+              };
+              if (activeModel.fromProjectCharacter) {
+                baseDataCharRef.current = liveConfig;
+                baseDataStateRef.current = { ...baseDataStateRef.current, char: liveConfig };
+                setBaseDataState(prev => ({ ...prev, char: liveConfig }));
+              } else if (!isProjectModeRef.current) {
+                baseDataCharRef.current = liveConfig;
+                baseDataStateRef.current = { ...baseDataStateRef.current, char: liveConfig };
+                setBaseDataState(prev => ({ ...prev, char: liveConfig }));
+              }
 
               mountGLBModelRef.current(gltf, {
-                ...storedGLB,
-                idleClipName: storedGLB.model3dClips?.idle || storedGLB.idleClipName,
-                runClipName: storedGLB.model3dClips?.run || storedGLB.runClipName,
+                ...activeModel,
+                idleClipName: activeModel.model3dClips?.idle || activeModel.idleClipName,
+                runClipName: activeModel.model3dClips?.run || activeModel.runClipName,
               });
             });
             return;
@@ -3197,10 +3302,20 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       }
 
       // Project snapshot: base GLB files land in the base data state so the
-      // debounced project save-back includes them
+      // debounced project save-back includes them (never overwrite user edits made during init)
       if (dungeonProjectRef.current) {
         const p = dungeonProjectRef.current;
-        setBaseDataState({ floor: p.baseFloor ?? null, wall: p.baseWall ?? null, door: p.baseDoor ?? null, char: p.baseCharacter ?? null });
+        setBaseDataState(prev => {
+          const next = {
+            floor: userEditedBaseRef.current.floor ? prev.floor : (p.baseFloor ?? null),
+            wall: userEditedBaseRef.current.wall ? prev.wall : (p.baseWall ?? null),
+            door: userEditedBaseRef.current.door ? prev.door : (p.baseDoor ?? null),
+            char: userEditedBaseRef.current.char ? prev.char : (p.baseCharacter ?? null),
+          };
+          baseDataStateRef.current = next;
+          if (!userEditedBaseRef.current.char) baseDataCharRef.current = next.char;
+          return next;
+        });
       }
       // From here on every edit flows into the project save-back
       restoredInitRef.current = true;
@@ -3415,7 +3530,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
       ensureUniqueMaterials(model);
 
       // Bottom-center pivot + approx. player height (1.85m), adjusted by character transform
-      const box = new THREE.Box3().setFromObject(model);
+      const box = computeCharacterBounds(model);
       const size = box.getSize(new THREE.Vector3());
       const center = box.getCenter(new THREE.Vector3());
       const baseScale = size.y > 0.001 ? 1.85 / size.y : 1.0;
@@ -3458,6 +3573,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
         idleAction: null as THREE.AnimationAction | null
       };
       placedNpcsGroup.add(holder);
+      setBattleWeaponsVisible(holder, false);
 
       // Start the idle animation of this character (respecting dungeon library + character mapping)
       const libEntry = npcLibraryRef.current.find(e => e.id === inst.libraryId);
@@ -4491,7 +4607,15 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
     if (playModeRef.current) {
       const surfaceY = () => getTileWorldPosRef.current(0, 0).y;
       const isWalkable = (c: number, r: number) => walkableKeysRef.current.has(`${c},${r}`);
-      const party = new Party(scene, charactersRef.current, (c, r) => getTileWorldPosRef.current(c, r), isWalkable, surfaceY);
+      const baseChar = dungeonProjectRef.current?.baseCharacter ?? baseDataCharRef.current;
+      const party = new Party(
+        scene,
+        charactersRef.current,
+        (c, r) => getTileWorldPosRef.current(c, r),
+        isWalkable,
+        surfaceY,
+        { leaderCharacterId: baseChar?.characterId, leaderFileName: baseChar?.fileName }
+      );
       partyRef.current = party;
       party.resetAround(currentTileRef.current);
       const bridge: BattleBridge = {
@@ -4522,15 +4646,15 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
           const baseChar = baseDataCharRef.current;
           const mergedClips =
             leaderChar?.model3dClips || baseChar?.model3dClips
-              ? { ...leaderChar?.model3dClips, ...baseChar?.model3dClips }
+              ? { ...baseChar?.model3dClips, ...leaderChar?.model3dClips }
               : undefined;
           const mergedImpacts =
             leaderChar?.model3dImpactTimes || baseChar?.model3dImpactTimes
-              ? { ...leaderChar?.model3dImpactTimes, ...baseChar?.model3dImpactTimes }
+              ? { ...baseChar?.model3dImpactTimes, ...leaderChar?.model3dImpactTimes }
               : undefined;
           const mergedAbilities =
             leaderChar?.model3dAbilityAnims || baseChar?.model3dAbilityAnims
-              ? { ...leaderChar?.model3dAbilityAnims, ...baseChar?.model3dAbilityAnims }
+              ? { ...baseChar?.model3dAbilityAnims, ...leaderChar?.model3dAbilityAnims }
               : undefined;
           return new BattleAnimator(animationMixerRef.current, [...gltfClipsMapRef.current.values()], {
             characterName: leaderChar?.name ?? baseChar?.fileName?.replace(/\.(glb|gltf)$/i, '') ?? 'Anführer',
@@ -5379,6 +5503,18 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                             ({(customModelSize / (1024 * 1024)).toFixed(2)} MB)
                           </span>
                         )}
+                        {baseDataState.char?.characterId ? (
+                          <span className="text-[10px] bg-cyan-900/80 text-cyan-200 border border-cyan-500/40 px-1.5 py-0.5 rounded font-semibold">
+                            Projekt-Charakter (Live)
+                          </span>
+                        ) : (
+                          <span
+                            className="text-[10px] bg-amber-950/80 text-amber-300 border border-amber-600/40 px-1.5 py-0.5 rounded font-semibold"
+                            title="Nur Test-GLB im Dungeon-Editor. Im Spiel-Modus wird automatisch der aktive Projekt-Charakter aus dem Charakter-Editor genutzt — oder klicke unten unter 'Aus Projekt:' auf einen Charakter."
+                          >
+                            Dungeon-Test-GLB
+                          </span>
+                        )}
                       </div>
                     ) : (
                       <span className="text-xs text-gray-300 bg-gray-800 px-2 py-0.5 rounded-lg border border-gray-700">
@@ -5430,7 +5566,7 @@ export const DungeonTestView: React.FC<DungeonTestViewProps> = ({ onExit, charac
                           }
                         }}
                         className={`px-2.5 py-1 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-all flex-shrink-0 ${
-                          customModelName.startsWith(char.name)
+                          baseDataState.char?.characterId === char.id
                             ? 'bg-cyan-900/60 text-cyan-200 border-cyan-500 shadow'
                             : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:bg-gray-700'
                         }`}

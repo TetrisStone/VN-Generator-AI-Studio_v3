@@ -9,8 +9,11 @@ import {
   DEFAULT_IMPACT_TIME,
   autoMapClipNames,
   clampImpactRatio,
+  computeCharacterBounds,
   defaultAbilityApproach,
+  isCombatClipKey,
   resolveImpactTime,
+  setBattleWeaponsVisible,
   stripRootMotion,
 } from '../animation';
 
@@ -224,4 +227,83 @@ test('BattleAnimator logs missing clip once per character and handles empty/miss
   } finally {
     console.warn = origWarn;
   }
+});
+
+test('setBattleWeaponsVisible toggles standardized battle_weapon and explore_weapon nodes cleanly', () => {
+  const root = new THREE.Group();
+  const body = new THREE.Mesh();
+  body.name = 'CharacterBody';
+  const battleSword = new THREE.Mesh();
+  battleSword.name = 'battle_weapon_sword';
+  const legacyBattle = new THREE.Mesh();
+  legacyBattle.name = 'Weapon_Battle_Axe';
+  const backSheath = new THREE.Mesh();
+  backSheath.name = 'explore_weapon_sheathed';
+  root.add(body, battleSword, legacyBattle, backSheath);
+
+  assert.equal(setBattleWeaponsVisible(root, false), true);
+  assert.equal(body.visible, true);
+  assert.equal(battleSword.visible, false);
+  assert.equal(legacyBattle.visible, false);
+  assert.equal(backSheath.visible, true);
+
+  assert.equal(setBattleWeaponsVisible(root, true), true);
+  assert.equal(body.visible, true);
+  assert.equal(battleSword.visible, true);
+  assert.equal(legacyBattle.visible, true);
+  assert.equal(backSheath.visible, false);
+
+  const plain = new THREE.Group();
+  plain.add(new THREE.Mesh());
+  assert.equal(setBattleWeaponsVisible(plain, true), false);
+});
+
+test('isCombatClipKey separates exploration keys from combat keys', () => {
+  assert.equal(isCombatClipKey('idle'), false);
+  assert.equal(isCombatClipKey('run'), false);
+  assert.equal(isCombatClipKey('combat_idle'), true);
+  assert.equal(isCombatClipKey('attack'), true);
+  assert.equal(isCombatClipKey('defeat'), true);
+});
+
+test('computeCharacterBounds excludes battle_weapon and explore_weapon subtrees', () => {
+  const root = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.7, 0.4));
+  body.position.y = 0.85; // spans y = [0, 1.7]
+  const hand = new THREE.Group();
+  hand.name = 'mixamorig:RightHand';
+  const sword = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.2, 0.1));
+  sword.name = 'battle_weapon_sword';
+  sword.position.y = -0.1; // extends down to y = -0.7
+  hand.add(sword);
+  root.add(body, hand);
+
+  const box = computeCharacterBounds(root);
+  assert.ok(Math.abs(box.min.y - 0) < 1e-4, `expected min.y ~ 0, got ${box.min.y}`);
+  assert.ok(Math.abs(box.max.y - 1.7) < 1e-4, `expected max.y ~ 1.7, got ${box.max.y}`);
+
+  // Fallback when only weapon meshes exist
+  const weaponOnly = new THREE.Group();
+  const soloSword = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.0, 0.2));
+  soloSword.name = 'battle_weapon_sword';
+  weaponOnly.add(soloSword);
+  const fallbackBox = computeCharacterBounds(weaponOnly);
+  assert.ok(Math.abs(fallbackBox.min.y - -0.5) < 1e-4);
+  assert.ok(Math.abs(fallbackBox.max.y - 0.5) < 1e-4);
+
+  // SkinnedMesh / object-level boundingBox takes precedence over quantized geometry.boundingBox [-1, +1]
+  const quantizedRoot = new THREE.Group();
+  const skinnedLike: any = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2)); // raw geometry.boundingBox is [-1, +1]
+  skinnedLike.geometry.computeBoundingBox();
+  skinnedLike.boundingBox = null;
+  skinnedLike.computeBoundingBox = () => {
+    skinnedLike.boundingBox = new THREE.Box3(
+      new THREE.Vector3(-0.3, 0, -0.2),
+      new THREE.Vector3(0.3, 1.7, 0.2)
+    );
+  };
+  quantizedRoot.add(skinnedLike);
+  const skinnedBox = computeCharacterBounds(quantizedRoot);
+  assert.ok(Math.abs(skinnedBox.min.y - 0) < 1e-4, `expected min.y ~ 0, got ${skinnedBox.min.y}`);
+  assert.ok(Math.abs(skinnedBox.max.y - 1.7) < 1e-4, `expected max.y ~ 1.7, got ${skinnedBox.max.y}`);
 });

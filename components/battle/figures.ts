@@ -5,50 +5,13 @@ import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Character } from '../../types';
 import { createGLTFLoader, loadGlbArrayBuffer } from '../../utils/gltfLoader';
-import { BattleAnimator, ensureUniqueMaterials, stripRootMotion } from '../../battle/animation';
-import { resolveHeroStats, resolveSparkStats } from '../../battle/stats';
-import type { ResolvedStats } from '../../battle/types';
+import { BattleAnimator, computeCharacterBounds, ensureUniqueMaterials, setBattleWeaponsVisible, stripRootMotion } from '../../battle/animation';
+import { buildRoster, type BuildRosterOptions, type RosterEntry } from '../../battle/roster';
 import type { Tile } from '../../battle/detection';
 import { BREADCRUMB_LENGTH } from '../../battle/config';
 
 export { BattleAnimator as Animator, type BattleClipKey as ClipKind } from '../../battle/animation';
-
-// ---------------------------------------------------------------------------
-// Roster: 3 heroes + Spark. Derived from the project characters because the
-// project has no party data yet.
-// ---------------------------------------------------------------------------
-export interface RosterEntry {
-  id: string;
-  name: string;
-  characterId?: string;
-  isSpark: boolean;
-  stats: ResolvedStats;
-  color: number;
-}
-
-const HERO_COLORS = [0x38bdf8, 0x34d399, 0xa78bfa];
-
-/**
- * Party = first 3 non-Spark characters that are not evil (main characters
- * first) + the Spark character. Missing members are filled with defaults.
- * Marching order: leader, hero 2, Spark, hero 3.
- */
-export function buildRoster(characters: Character[]): RosterEntry[] {
-  const candidates = characters.filter(c => !c.isSpark && c.alignment !== 'boese');
-  candidates.sort((a, b) => (a.importance === 'main' ? 0 : 1) - (b.importance === 'main' ? 0 : 1));
-  const heroes: RosterEntry[] = [];
-  for (let k = 0; k < 3; k++) {
-    const c = candidates[k];
-    heroes.push(c
-      ? { id: `hero_${c.id}`, name: c.name, characterId: c.id, isSpark: false, stats: resolveHeroStats(c.battleStats), color: HERO_COLORS[k] }
-      : { id: `hero_default_${k + 1}`, name: `Held ${k + 1}`, isSpark: false, stats: resolveHeroStats(), color: HERO_COLORS[k] });
-  }
-  const sc = characters.find(c => c.isSpark);
-  const spark: RosterEntry = sc
-    ? { id: `spark_${sc.id}`, name: sc.name, characterId: sc.id, isSpark: true, stats: resolveSparkStats(sc.battleStats), color: 0xfbbf24 }
-    : { id: 'spark_default', name: 'Spark', isSpark: true, stats: resolveSparkStats(), color: 0xfbbf24 };
-  return [heroes[0], heroes[1], spark, heroes[2]];
-}
+export { buildRoster, type BuildRosterOptions, type RosterEntry } from '../../battle/roster';
 
 // ---------------------------------------------------------------------------
 // Models
@@ -130,7 +93,7 @@ function buildFigure(
     });
     ensureUniqueMaterials(model);
 
-    const box = new THREE.Box3().setFromObject(model);
+    const box = computeCharacterBounds(model);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     model.position.set(-center.x, -box.min.y, -center.z);
@@ -170,6 +133,7 @@ function buildFigure(
   shadow.rotation.x = -Math.PI / 2;
   shadow.position.y = 0.02;
   root.add(shadow);
+  setBattleWeaponsVisible(root, false);
   return { entry, root, inner, animator, tile: { col: 0, row: 0 }, target: null, moving: false };
 }
 
@@ -192,9 +156,10 @@ export class Party {
     characters: Character[],
     private tileToWorld: (col: number, row: number) => THREE.Vector3,
     private isWalkable: (col: number, row: number) => boolean,
-    private surfaceY: () => number
+    private surfaceY: () => number,
+    rosterOptions?: BuildRosterOptions
   ) {
-    this.roster = buildRoster(characters);
+    this.roster = buildRoster(characters, rosterOptions);
     this.group.name = 'PartyFollowers';
     scene.add(this.group);
     // Placeholders immediately, GLBs replace them once loaded

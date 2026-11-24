@@ -18,6 +18,7 @@ import {
   BattleAnimator,
   BattleEventQueue,
   ensureUniqueMaterials,
+  setBattleWeaponsVisible,
   setObjectOpacity,
   setObjectRedEmissive,
 } from '../../battle/animation';
@@ -442,6 +443,7 @@ export class BattleDirector {
       ensureUniqueMaterials(root);
       setObjectOpacity(root, 1);
       setObjectRedEmissive(root, 0);
+      setBattleWeaponsVisible(root, true);
       const { stars, shield } = this.makeStatusFx();
       const animator = isLeader
         ? leaderAnimator
@@ -466,6 +468,7 @@ export class BattleDirector {
       ensureUniqueMaterials(root);
       setObjectOpacity(root, 1);
       setObjectRedEmissive(root, 0);
+      setBattleWeaponsVisible(root, true);
       const ud = root.userData ?? {};
       const libEntry = npcLib.find(x => x.id === e.fig.libraryId);
       const linkedChar = e.fig.characterId ? chars.find(c => c.id === e.fig.characterId) : undefined;
@@ -1398,6 +1401,7 @@ export class BattleDirector {
       f.root.rotation.x = 0;
       setObjectOpacity(f.root, 1);
       setObjectRedEmissive(f.root, 0);
+      setBattleWeaponsVisible(f.root, false);
       f.anim().play('idle');
     }
   }
@@ -1479,6 +1483,7 @@ export class BattleDirector {
         f.root.rotation.set(0, f.origin.rotY, 0);
         setObjectOpacity(f.root, 1);
         setObjectRedEmissive(f.root, 0);
+        setBattleWeaponsVisible(f.root, false);
         f.root.visible = !defeated && !f.temp;
         f.anim().play('idle');
       }

@@ -415,6 +415,7 @@ export interface DungeonNpcPlacement {
 /** Base chunk/character GLB mounted at the grid origin (incl. user config) */
 export interface DungeonBaseGLB {
   fileName: string;
+  characterId?: string;
   fileSize?: number;
   assetId?: string;
   dataBase64?: string;
