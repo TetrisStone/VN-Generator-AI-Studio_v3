@@ -243,15 +243,15 @@ export const SettingsView: React.FC<SettingsViewProps> = (viewProps) => {
                                     <span className="text-xs font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-800/50 font-semibold">
                                         {props.worldInfo.ollamaNumCtx 
                                             ? `${props.worldInfo.ollamaNumCtx >= 1024 ? `${(props.worldInfo.ollamaNumCtx / 1024).toFixed(props.worldInfo.ollamaNumCtx % 1024 === 0 ? 0 : 1)}K` : props.worldInfo.ollamaNumCtx} Tokens (${props.worldInfo.ollamaNumCtx})` 
-                                            : '8K Tokens (8192)'}
+                                            : '16K Tokens (16384)'}
                                     </span>
                                 </div>
                                 <input 
                                     type="number"
                                     className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none font-mono text-sm"
-                                    value={props.worldInfo.ollamaNumCtx ?? 8192}
-                                    placeholder="8192"
-                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaNumCtx: parseInt(e.target.value, 10) || 8192 })}
+                                    value={props.worldInfo.ollamaNumCtx ?? 16384}
+                                    placeholder="16384"
+                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaNumCtx: parseInt(e.target.value, 10) || 16384 })}
                                 />
                                 <div>
                                     <div className="text-[11px] text-gray-400 mb-1.5 font-medium">Standardgrößen (Schnellwahl per Klick):</div>
@@ -259,13 +259,13 @@ export const SettingsView: React.FC<SettingsViewProps> = (viewProps) => {
                                         {[
                                             { label: '2K (2048)', val: 2048 },
                                             { label: '4K (4096)', val: 4096 },
-                                            { label: '8K (8192)', val: 8192, badge: 'Standard' },
-                                            { label: '16K (16384)', val: 16384 },
+                                            { label: '8K (8192)', val: 8192 },
+                                            { label: '16K (16384)', val: 16384, badge: 'Standard' },
                                             { label: '32K (32768)', val: 32768 },
                                             { label: '64K (65536)', val: 65536, badge: 'Groß' },
                                             { label: '128K (131072)', val: 131072 }
                                         ].map(preset => {
-                                            const isSelected = (props.worldInfo.ollamaNumCtx ?? 8192) === preset.val;
+                                            const isSelected = (props.worldInfo.ollamaNumCtx ?? 16384) === preset.val;
                                             return (
                                                 <button
                                                     key={preset.val}
@@ -314,7 +314,7 @@ export const SettingsView: React.FC<SettingsViewProps> = (viewProps) => {
                             <div>
                                 <div className="flex justify-between items-center mb-1">
                                     <label className="text-xs font-bold text-gray-500 uppercase">Repeat Penalty</label>
-                                    <span className="text-[11px] text-gray-400 font-mono">{props.worldInfo.ollamaRepeatPenalty ?? 1.1}</span>
+                                    <span className="text-[11px] text-gray-400 font-mono">{props.worldInfo.ollamaRepeatPenalty ?? 1.05}</span>
                                 </div>
                                 <input 
                                     type="number"
@@ -322,11 +322,11 @@ export const SettingsView: React.FC<SettingsViewProps> = (viewProps) => {
                                     min="1"
                                     max="2"
                                     className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white h-[42px] focus:border-emerald-500 outline-none font-mono text-sm"
-                                    value={props.worldInfo.ollamaRepeatPenalty ?? 1.1}
-                                    placeholder="1.1"
-                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaRepeatPenalty: parseFloat(e.target.value) || 1.1 })}
+                                    value={props.worldInfo.ollamaRepeatPenalty ?? 1.05}
+                                    placeholder="1.05"
+                                    onChange={e => props.onUpdateWorldInfo({ ...props.worldInfo, ollamaRepeatPenalty: parseFloat(e.target.value) || 1.05 })}
                                 />
-                                <p className="text-[10px] text-gray-500 mt-1">1.1 empfohlen zur Vermeidung von Wiederholungen.</p>
+                                <p className="text-[10px] text-gray-500 mt-1">1.0 – 1.05 empfohlen (besonders für Qwen 3.5/3.6 & Gemma 4).</p>
                             </div>
                         </>
                     )}

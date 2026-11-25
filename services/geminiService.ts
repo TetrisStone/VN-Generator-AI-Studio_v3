@@ -345,15 +345,11 @@ async function callLLM(
 
             const options: Record<string, unknown> = {
                 temperature: worldInfo?.ollamaTemperature ?? 0.7,
-                repeat_penalty: worldInfo?.ollamaRepeatPenalty ?? 1.1,
-                num_predict: 2048
+                repeat_penalty: worldInfo?.ollamaRepeatPenalty ?? 1.05,
+                num_predict: 2048,
+                // num_ctx immer begrenzen (Standard 16384), damit Modelle mit großem Modelfile-Kontext (z.B. 262K) nicht unnötig VRAM reservieren.
+                num_ctx: worldInfo?.ollamaNumCtx || 16384
             };
-
-            // num_ctx nur mitsenden, wenn in der App explizit gesetzt.
-            // Andernfalls gilt die Einstellung der Ollama-App.
-            if (worldInfo?.ollamaNumCtx) {
-                options.num_ctx = worldInfo.ollamaNumCtx;
-            }
 
             const res = await fetch(`${url}/api/generate`, {
                 method: 'POST',
@@ -880,15 +876,15 @@ Antworte AUSSCHLIESSLICH mit den kommagetrennten Tags, ohne Erklärungen, ohne A
                 stream: false,
                 think: false,
                 options: {
-                    num_ctx: worldInfo?.ollamaNumCtx || 8192,
+                    num_ctx: worldInfo?.ollamaNumCtx || 16384,
                     temperature: worldInfo?.ollamaTemperature ?? 0.8,
-                    repeat_penalty: worldInfo?.ollamaRepeatPenalty ?? 1.1
+                    repeat_penalty: worldInfo?.ollamaRepeatPenalty ?? 1.05
                 }
             })
         });
         if (!res.ok) throw new Error("Ollama Error");
         const data = await res.json();
-        return data.response.trim();
+        return (typeof data.response === 'string' ? data.response : '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     } else {
         const response = await fetch("/api/gemini/generateText", {
             method: "POST",
